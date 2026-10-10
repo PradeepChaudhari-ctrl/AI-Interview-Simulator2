@@ -1,0 +1,752 @@
+
+========== backend/app/models/models.py ==========
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy import (
+    Column, String, Text, Float, Integer, DateTime, ForeignKey, Index
+)
+from sqlalchemy.orm import relationship
+from backend.app.core.database import Base
+
+def generate_uuid() -> str:
+    return str(uuid.uuid4())
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    name = Column(String(255), nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
+    blueprints = relationship("InterviewBlueprint", back_populates="user", cascade="all, delete-orphan")
+    sessions = relationship("InterviewSession", back_populates="user", cascade="all, delete-orphan")
+    answers = relationship("Answer", back_populates="user", cascade="all, delete-orphan")
+    practice_sessions = relationship("PracticeSession", back_populates="user", cascade="all, delete-orphan")
+
+class Resume(Base):
+    __tablename__ = "resumes"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    original_filename = Column(String(255), nullable=False)
+    storage_path = Column(String(512), nullable=False)
+    parsed_profile_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    user = relationship("User", back_populates="resumes")
+    blueprints = relationship("InterviewBlueprint", back_populates="resume")
+
+class InterviewBlueprint(Base):
+    __tablename__ = "interview_blueprints"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    resume_id = Column(String(36), ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True, index=True)
+    target_role = Column(String(255), nullable=False)
+    jd_text = Column(Text, nullable=True)
+    blueprint_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    user = relationship("User", back_populates="blueprints")
+    resume = relationship("Resume", back_populates="blueprints")
+    sessions = relationship("InterviewSession", back_populates="blueprint", cascade="all, delete-orphan")
+
+class InterviewSession(Base):
+    __tablename__ = "interview_sessions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    blueprint_id = Column(String(36), ForeignKey("interview_blueprints.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(50), nullable=False, default="in_progress", index=True)  # in_progress, completed
+    mode = Column(String(50), nullable=False, default="text")  # text, voice, video
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="sessions")
+    blueprint = relationship("InterviewBlueprint", back_populates="sessions")
+    rounds = relationship("InterviewRound", back_populates="session", cascade="all, delete-orphan", order_by="InterviewRound.round_order")
+    report = relationship("Report", back_populates="session", uselist=False, cascade="all, delete-orphan")
+
+class InterviewRound(Base):
+    __tablename__ = "interview_rounds"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    session_id = Column(String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    round_type = Column(String(100), nullable=False)
+    round_order = Column(Integer, nullable=False)
+    status = Column(String(50), nullable=False, default="pending")  # pending, in_progress, completed
+    score = Column(Float, nullable=True)
+
+    session = relationship("InterviewSession", back_populates="rounds")
+    questions = relationship("Question", back_populates="round", cascade="all, delete-orphan")
+
+class Question(Base):
+    __tablename__ = "questions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    round_id = Column(String(36), ForeignKey("interview_rounds.id", ondelete="CASCADE"), nullable=False, index=True)
+    question_text = Column(Text, nullable=False)
+    question_type = Column(String(50), nullable=False, default="conceptual")
+    difficulty = Column(String(50), nullable=False, default="medium")
+    topic = Column(String(255), nullable=False)
+    metadata_json = Column(Text, nullable=False, default="{}")
+
+    round = relationship("InterviewRound", back_populates="questions")
+    answers = relationship("Answer", back_populates="question", cascade="all, delete-orphan")
+
+class Answer(Base):
+    __tablename__ = "answers"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    question_id = Column(String(36), ForeignKey("questions.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    text_answer = Column(Text, nullable=False)
+    transcript = Column(Text, nullable=True)
+    duration_seconds = Column(Float, nullable=False, default=0.0)
+    evaluation_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    question = relationship("Question", back_populates="answers")
+    user = relationship("User", back_populates="answers")
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    session_id = Column(String(36), ForeignKey("interview_sessions.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    overall_metrics_json = Column(Text, nullable=False, default="{}")
+    weaknesses_json = Column(Text, nullable=False, default="[]")
+    recommendations_json = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    session = relationship("InterviewSession", back_populates="report")
+    practice_sessions = relationship("PracticeSession", back_populates="report")
+
+class PracticeSession(Base):
+    __tablename__ = "practice_sessions"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_report_id = Column(String(36), ForeignKey("reports.id", ondelete="SET NULL"), nullable=True, index=True)
+    topic = Column(String(255), nullable=False)
+    status = Column(String(50), nullable=False, default="pending")  # pending, in_progress, completed
+    score = Column(Float, nullable=True)
+    qa_json = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    user = relationship("User", back_populates="practice_sessions")
+    report = relationship("Report", back_populates="practice_sessions")
+
+========== backend/app/prompts/blueprint.py ==========
+import json
+from typing import Optional, Dict, Any
+
+BLUEPRINT_SYSTEM_PROMPT = """You are an elite interview architect and hiring committee chair.
+Your task is to design a personalized multi-round interview blueprint customized to a candidate's target role, background, and optional Job Description.
+
+Do NOT simply output generic rounds. Create realistic, tailored rounds that thoroughly prepare the candidate.
+Each blueprint must contain 3 to 5 realistic rounds (e.g., Aptitude/Foundational, Core Discipline/CS, Technical & Projects, Behavioral/HR, or System Design/Case Study depending on role).
+
+Return ONLY valid JSON matching this schema:
+{
+  "target_role": "Target Role Title",
+  "experience_level": "Level e.g. Entry, Mid, Senior",
+  "rounds": [
+    {
+      "name": "Round Title (e.g. Core Computer Science & Problem Solving)",
+      "round_type": "aptitude | core | technical | behavioral | coding | case_study",
+      "objective": "Clear description of the round's objective",
+      "topics": ["topic 1", "topic 2", "topic 3"],
+      "question_count": 3,
+      "difficulty": "easy | medium | hard | adaptive",
+      "time_limit_minutes": 15,
+      "allowed_modes": ["text", "voice", "video"],
+      "evaluation_criteria": ["criteria 1", "criteria 2"]
+    }
+  ]
+}
+
+No markdown formatting, no backticks, no extra text.
+"""
+
+def build_blueprint_prompt(
+    target_role: str,
+    experience_level: Optional[str] = None,
+    candidate_profile: Optional[Dict[str, Any]] = None,
+    jd_text: Optional[str] = None,
+    template_type: Optional[str] = None
+) -> str:
+    profile_summary = ""
+    if candidate_profile:
+        skills = candidate_profile.get("skills", [])
+        projects = [p.get("name") for p in candidate_profile.get("projects", [])]
+        tools = candidate_profile.get("tools", [])
+        profile_summary = (
+            f"Candidate Skills: {', '.join(skills)}\n"
+            f"Candidate Projects: {', '.join(projects)}\n"
+            f"Candidate Tools: {', '.join(tools)}\n"
+        )
+    
+    jd_summary = f"\nTarget Job Description:\n{jd_text[:3000]}\n" if jd_text else "\nNo specific JD provided.\n"
+    template_info = f"\nRequested Template Style: {template_type}\n" if template_type else ""
+
+    return f"""Target Role: {target_role}
+Experience Level: {experience_level or 'Entry / Mid-level'}
+{template_info}
+{profile_summary}
+{jd_summary}
+
+Design the optimal multi-round interview blueprint. Return ONLY the strict JSON object."""
+
+========== backend/app/schemas/blueprint.py ==========
+from pydantic import BaseModel, Field, ConfigDict
+from datetime import datetime
+from typing import List, Optional
+
+class BlueprintRound(BaseModel):
+    name: str
+    round_type: str = Field(..., description="aptitude, core, technical, behavioral, coding, case_study")
+    objective: str
+    topics: List[str] = Field(default_factory=list)
+    question_count: int = Field(default=3, ge=1, le=10)
+    difficulty: str = Field(default="medium", description="easy, medium, hard, adaptive")
+    time_limit_minutes: int = Field(default=15, ge=5, le=60)
+    allowed_modes: List[str] = Field(default=["text", "voice", "video"])
+    evaluation_criteria: List[str] = Field(default_factory=list)
+
+class BlueprintData(BaseModel):
+    target_role: str
+    experience_level: Optional[str] = "Entry / Mid-level"
+    rounds: List[BlueprintRound]
+
+class BlueprintGenerateRequest(BaseModel):
+    target_role: str = Field(..., min_length=2)
+    resume_id: Optional[str] = None
+    jd_text: Optional[str] = None
+    template_type: Optional[str] = None  # software_developer, data_analyst, campus_placement, custom
+    experience_level: Optional[str] = "Entry to Mid-Level"
+    preferred_language: Optional[str] = "English"
+
+class BlueprintResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    target_role: str
+    resume_id: Optional[str] = None
+    jd_text: Optional[str] = None
+    blueprint: BlueprintData
+    created_at: datetime
+
+========== backend/app/prompts/question_generation.py ==========
+import json
+from typing import List, Dict, Any, Optional
+
+QUESTION_SYSTEM_PROMPT = """You are an experienced technical and behavioral interviewer at a top technology company.
+Your goal is to conduct an authentic, probing, yet constructive interview.
+You generate realistic interview questions for a specific round of an interview blueprint.
+
+When generating technical and project questions:
+- Reference the candidate's actual projects, technologies, and skills extracted from their resume.
+- Ground your questions in real-world scenarios, architectural trade-offs, and debugging.
+- Never invent facts about the candidate that are not in the profile.
+
+Return ONLY valid JSON matching this schema:
+{
+  "question": "The interview question text clearly worded for the candidate",
+  "type": "conceptual | practical | behavioral | coding | follow_up",
+  "topic": "The specific topic or project tested",
+  "difficulty": "easy | medium | hard",
+  "expected_concepts": ["concept or keyword 1", "concept or keyword 2"]
+}
+No markdown formatting, no backticks.
+"""
+
+def build_question_prompt(
+    round_name: str,
+    round_type: str,
+    round_objective: str,
+    topics: List[str],
+    difficulty: str,
+    target_role: str,
+    candidate_profile: Optional[Dict[str, Any]] = None,
+    previous_questions: Optional[List[str]] = None,
+    question_index: int = 1,
+    total_questions: int = 3
+) -> str:
+    profile_text = ""
+    if candidate_profile:
+        profile_text = (
+            f"Candidate Name: {candidate_profile.get('name', 'Candidate')}\n"
+            f"Skills: {', '.join(candidate_profile.get('skills', []))}\n"
+            f"Tools: {', '.join(candidate_profile.get('tools', []))}\n"
+            f"Projects: {json.dumps(candidate_profile.get('projects', []), indent=1)}\n"
+            f"Experience: {json.dumps(candidate_profile.get('experience', []), indent=1)}\n"
+        )
+    
+    prev_q_text = ""
+    if previous_questions:
+        prev_q_text = f"Already Asked Questions in this round (DO NOT REPEAT):\n- " + "\n- ".join(previous_questions) + "\n"
+
+    return f"""Target Role: {target_role}
+Current Round: {round_name} (Type: {round_type})
+Round Objective: {round_objective}
+Topics to cover: {', '.join(topics)}
+Target Difficulty: {difficulty}
+Question Number: {question_index} of {total_questions}
+
+Candidate Background:
+{profile_text}
+
+{prev_q_text}
+
+Generate question #{question_index} for this candidate. Ground it in the candidate's actual experience and the round topic. Return ONLY the strict JSON object."""
+
+========== frontend/src/types/index.ts ==========
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  created_at: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
+
+export interface EducationItem {
+  institution?: string;
+  degree?: string;
+  field_of_study?: string;
+  year?: string;
+  grade?: string;
+}
+
+export interface ExperienceItem {
+  company?: string;
+  role?: string;
+  duration?: string;
+  description?: string;
+  key_contributions?: string[];
+}
+
+export interface ProjectItem {
+  name: string;
+  description?: string;
+  technologies?: string[];
+  key_features?: string[];
+  outcome?: string;
+}
+
+export interface ParsedProfile {
+  name: string;
+  email?: string;
+  phone?: string;
+  summary?: string;
+  education?: EducationItem[];
+  skills?: string[];
+  projects?: ProjectItem[];
+  experience?: ExperienceItem[];
+  certifications?: string[];
+  achievements?: string[];
+  tools?: string[];
+  keywords?: string[];
+}
+
+export interface Resume {
+  id: string;
+  original_filename: string;
+  parsed_profile: ParsedProfile;
+  created_at: string;
+}
+
+export interface BlueprintRound {
+  name: string;
+  round_type: 'aptitude' | 'core' | 'technical' | 'behavioral' | 'coding' | 'case_study' | string;
+  objective: string;
+  topics: string[];
+  question_count: number;
+  difficulty: string;
+  time_limit_minutes: number;
+  allowed_modes: string[];
+  evaluation_criteria: string[];
+}
+
+export interface BlueprintData {
+  target_role: string;
+  experience_level?: string;
+  rounds: BlueprintRound[];
+}
+
+export interface InterviewBlueprint {
+  id: string;
+  target_role: string;
+  resume_id?: string;
+  jd_text?: string;
+  blueprint: BlueprintData;
+  created_at: string;
+}
+
+export interface Question {
+  id: string;
+  round_id: string;
+  question_text: string;
+  question_type: string;
+  difficulty: string;
+  topic: string;
+  expected_concepts: string[];
+  question_number: number;
+  total_questions_in_round: number;
+}
+
+export interface AnswerEvaluation {
+  score: number;
+  correctness: number;
+  relevance: number;
+  technical_depth: number;
+  clarity: number;
+  completeness: number;
+  communication_observation?: string;
+  confidence_observation?: string;
+  strengths: string[];
+  weaknesses: string[];
+  improvement_tip: string;
+  detected_topics: string[];
+  weakness_tags: string[];
+  follow_up_needed: boolean;
+  suggested_follow_up_direction?: string;
+}
+
+export interface Answer {
+  id: string;
+  question_id: string;
+  text_answer: string;
+  transcript?: string;
+  duration_seconds: number;
+  evaluation: AnswerEvaluation;
+  created_at: string;
+}
+
+export interface InterviewRound {
+  id: string;
+  round_type: string;
+  round_order: number;
+  status: 'pending' | 'in_progress' | 'completed' | string;
+  score?: number | null;
+  name?: string;
+  objective?: string;
+  question_count: number;
+  completed_question_count: number;
+}
+
+export interface InterviewSession {
+  id: string;
+  blueprint_id: string;
+  target_role: string;
+  status: 'in_progress' | 'completed' | string;
+  mode: 'text' | 'voice' | 'video' | string;
+  started_at: string;
+  completed_at?: string | null;
+  rounds: InterviewRound[];
+  current_round?: InterviewRound | null;
+  current_question?: Question | null;
+}
+
+export interface RoundMetric {
+  round_order: number;
+  round_type: string;
+  round_name: string;
+  score: number;
+  total_questions: number;
+  key_strengths: string[];
+  areas_for_growth: string[];
+}
+
+export interface TopicMetric {
+  topic: string;
+  score: number;
+  status: 'strong' | 'satisfactory' | 'needs_practice' | string;
+}
+
+export interface OverallMetrics {
+  readiness_score: number;
+  technical_depth_score: number;
+  communication_score: number;
+  problem_solving_score: number;
+  clarity_score: number;
+  total_questions_answered: number;
+  total_duration_seconds: number;
+  round_metrics: RoundMetric[];
+  topic_metrics: TopicMetric[];
+}
+
+export interface PracticePlanItem {
+  topic: string;
+  priority: 'High' | 'Medium' | 'Low' | string;
+  reason: string;
+  suggested_actions: string[];
+}
+
+export interface Report {
+  id: string;
+  session_id: string;
+  target_role: string;
+  overall_metrics: OverallMetrics;
+  weaknesses: string[];
+  strengths: string[];
+  recommendations: string[];
+  practice_plan: PracticePlanItem[];
+  created_at: string;
+}
+
+export interface PracticeQuestion {
+  id: string;
+  question_text: string;
+  concept_tested: string;
+  hint?: string;
+  difficulty: string;
+}
+
+export interface PracticeAnswerItem {
+  question_id: string;
+  question_text: string;
+  user_answer: string;
+  feedback: string;
+  score: number;
+  ideal_concepts: string[];
+}
+
+export interface PracticeSession {
+  id: string;
+  topic: string;
+  status: 'pending' | 'in_progress' | 'completed' | string;
+  score?: number | null;
+  source_report_id?: string;
+  questions: PracticeQuestion[];
+  answers: PracticeAnswerItem[];
+  created_at: string;
+}
+
+========== frontend/src/services/interviewService.ts ==========
+import { request } from './apiClient';
+import { InterviewSession, Question, Answer } from '../types';
+
+export interface AnswerPayload {
+  text_answer: string;
+  transcript?: string;
+  duration_seconds?: number;
+  mode?: string;
+}
+
+export const interviewService = {
+  async startInterview(blueprintId: string, mode: string = 'text'): Promise<InterviewSession> {
+    return request<InterviewSession>('/api/interviews', {
+      method: 'POST',
+      body: JSON.stringify({ blueprint_id: blueprintId, mode }),
+    });
+  },
+
+  async listInterviews(): Promise<InterviewSession[]> {
+    return request<InterviewSession[]>('/api/interviews');
+  },
+
+  async getInterview(id: string): Promise<InterviewSession> {
+    return request<InterviewSession>(`/api/interviews/${id}`);
+  },
+
+  async getNextQuestion(sessionId: string): Promise<Question | null> {
+    return request<Question | null>(`/api/interviews/${sessionId}/next-question`, {
+      method: 'POST',
+    });
+  },
+
+  async submitAnswer(questionId: string, payload: AnswerPayload): Promise<Answer> {
+    return request<Answer>(`/api/questions/${questionId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async completeInterview(sessionId: string): Promise<InterviewSession> {
+    return request<InterviewSession>(`/api/interviews/${sessionId}/complete`, {
+      method: 'POST',
+    });
+  },
+};
+
+========== frontend/src/App.tsx ==========
+import React from 'react';
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+} from 'react-router-dom';
+
+import { AuthProvider } from './context/AuthContext';
+import { Navbar } from './components/Navbar';
+import { ProtectedRoute } from './components/ProtectedRoute';
+
+// Existing pages
+import { LandingPage } from './pages/LandingPage';
+import { LoginPage } from './pages/LoginPage';
+import { RegisterPage } from './pages/RegisterPage';
+import { DashboardPage } from './pages/DashboardPage';
+import { ResumesPage } from './pages/ResumesPage';
+import { InterviewSetupPage } from './pages/InterviewSetupPage';
+import { BlueprintPreviewPage } from './pages/BlueprintPreviewPage';
+import { InterviewRoomPage } from './pages/InterviewRoomPage';
+import { ReportPage } from './pages/ReportPage';
+import { PracticePage } from './pages/PracticePage';
+import { LiveContextPage } from './pages/LiveContextPage';
+
+// New MCQ pages
+import { MCQPracticePage } from './pages/MCQPracticePage';
+import { MockInterviewPage } from './pages/MockInterviewPage';
+
+
+export const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+
+        <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
+
+          {/* Navbar */}
+          <Navbar />
+
+          {/* Main Application */}
+          <main className="flex-1">
+
+            <Routes>
+
+              {/* =========================================
+                  PUBLIC ROUTES
+              ========================================= */}
+
+              <Route
+                path="/"
+                element={<LandingPage />}
+              />
+
+              <Route
+                path="/login"
+                element={<LoginPage />}
+              />
+
+              <Route
+                path="/register"
+                element={<RegisterPage />}
+              />
+
+
+              {/* =========================================
+                  PROTECTED ROUTES
+              ========================================= */}
+
+              <Route element={<ProtectedRoute />}>
+
+                {/* Dashboard */}
+                <Route
+                  path="/dashboard"
+                  element={<DashboardPage />}
+                />
+
+                {/* Resumes */}
+                <Route
+                  path="/resumes"
+                  element={<ResumesPage />}
+                />
+
+                {/* Interview Setup */}
+                <Route
+                  path="/setup"
+                  element={<InterviewSetupPage />}
+                />
+
+                {/* Blueprint */}
+                <Route
+                  path="/blueprint/:id"
+                  element={<BlueprintPreviewPage />}
+                />
+
+                {/* Live Interview */}
+                <Route
+                  path="/interview/:id"
+                  element={<InterviewRoomPage />}
+                />
+
+                {/* Interview Report */}
+                <Route
+                  path="/reports/:id"
+                  element={<ReportPage />}
+                />
+
+                {/* Practice */}
+                <Route
+                  path="/practice"
+                  element={<PracticePage />}
+                />
+
+                {/* =====================================
+                    LIVE CONTEXT
+                ===================================== */}
+
+                <Route
+                  path="/live-context"
+                  element={<LiveContextPage />}
+                />
+
+
+                {/* =====================================
+                    NEW: MCQ PRACTICE
+                ===================================== */}
+
+                <Route
+                  path="/mcq-practice"
+                  element={<MCQPracticePage />}
+                />
+
+
+                {/* =====================================
+                    NEW: MOCK INTERVIEW
+                ===================================== */}
+
+                <Route
+                  path="/mock-interview"
+                  element={<MockInterviewPage />}
+                />
+
+              </Route>
+
+
+              {/* =========================================
+                  FALLBACK
+              ========================================= */}
+
+              <Route
+                path="*"
+                element={
+                  <Navigate
+                    to="/"
+                    replace
+                  />
+                }
+              />
+
+            </Routes>
+
+          </main>
+
+        </div>
+
+      </BrowserRouter>
+    </AuthProvider>
+  );
+};
+
+
+export default App;

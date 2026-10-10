@@ -1,0 +1,72 @@
+# AI Interview Simulator
+
+A React + TypeScript frontend and FastAPI backend for AI-powered interview practice. Gemini is called by the backend; configure a real API key before using AI features. The app does not generate offline or placeholder AI results.
+
+## Requirements
+
+- Windows PowerShell
+- Python 3.10 or newer
+- Node.js 20.19+ or 22.12+
+- A Gemini API key
+
+## Configure the backend
+
+Open PowerShell in the project folder (`D:\gcethackathon`). Create the backend environment file only if it does not already exist:
+
+```powershell
+if (-not (Test-Path .\backend\.env)) {
+    Copy-Item .\backend\.env.example .\backend\.env
+}
+```
+
+Edit `backend\.env` and set:
+
+- `GEMINI_API_KEY` to your Gemini API key
+- `SECRET_KEY` to a private random value of at least 32 characters
+
+Keep this file private and do not commit it. The default database is SQLite; tables are created automatically when the backend starts. To use PostgreSQL, set `DATABASE_URL` to a PostgreSQL connection string. The PostgreSQL driver is included.
+
+Gemini requests are spaced using `GEMINI_RPM_LIMIT` (5 requests per minute by default; set it at or below the limit shown for your project and model in AI Studio). If the primary model returns a temporary HTTP 503, the backend tries `GEMINI_FALLBACK_MODEL` using the same API key. Quota and billing errors are returned without being routed around. See AI Studio's rate-limit page and [billing guide](https://ai.google.dev/gemini-api/docs/billing/) if you receive HTTP 429 for exhausted quota.
+
+## Start the backend
+
+Open a PowerShell window in the project folder and run:
+
+```powershell
+py -3 -m venv backend\.venv
+.\backend\.venv\Scripts\Activate.ps1
+python -m pip install -r backend\requirements.txt
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Keep this window open. The API runs at `http://127.0.0.1:8000`; its health check is `http://127.0.0.1:8000/api/health`.
+
+If `backend\.venv` already exists, skip the `py -3 -m venv ...` command and activate it. If PowerShell blocks activation, open Command Prompt and use `backend\.venv\Scripts\activate.bat`, then run the remaining Python commands there.
+
+## Start the frontend
+
+Open a second PowerShell window in the project folder and run:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open the address printed by Vite, usually `http://localhost:5173`. The Vite development server forwards `/api` requests to the backend on port 8000.
+
+To stop either server, press `Ctrl+C` in its window.
+
+## First use
+
+1. Register an account and log in.
+2. Upload a readable PDF, DOCX, or TXT resume.
+3. Review the extracted profile and choose a target role.
+4. Generate and review the interview blueprint.
+5. Start a text, voice, or video-preview session, then answer questions.
+6. View the report and start practice for identified topics.
+
+New interview blueprints contain five rounds. The first two rounds are multiple choice; the remaining three use the usual open-ended interview questions.
+
+If an AI-backed action fails, check that the backend is running and that `GEMINI_API_KEY` in `backend\.env` is valid. Resume uploads are limited by `MAX_UPLOAD_MB` (10 MB by default). Voice support depends on the browser; video mode currently provides a camera preview, not video-based evaluation.
+#

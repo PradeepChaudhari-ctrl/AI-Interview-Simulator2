@@ -1,0 +1,1850 @@
+
+========== frontend/src/pages/InterviewRoomPage.tsx ==========
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { interviewService } from '../services/interviewService';
+import {
+  InterviewSession,
+  Question,
+  AnswerEvaluation,
+  Answer,
+} from '../types';
+import { VoiceController } from '../components/VoiceController';
+import { VideoPreview } from '../components/VideoPreview';
+import {
+  Clock,
+  Send,
+  ArrowRight,
+  Sparkles,
+  CheckCircle2,
+  AlertCircle,
+  MessageSquare,
+  Mic,
+  Video,
+  Award,
+  Layers,
+  ChevronRight,
+  TrendingUp,
+} from 'lucide-react';
+
+export const InterviewRoomPage: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+
+  const [session, setSession] = useState<InterviewSession | null>(null);
+  const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
+  const [mode, setMode] = useState<'text' | 'voice' | 'video'>('text');
+  const [answerText, setAnswerText] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [evaluation, setEvaluation] = useState<AnswerEvaluation | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [roundCompletedModal, setRoundCompletedModal] = useState<boolean>(false);
+  const [isVoiceListening, setIsVoiceListening] = useState(false);
+
+  // Timer
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    loadSession();
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [id]);
+
+  useEffect(() => {
+    // Reset timer on question change
+    setElapsedSeconds(0);
+    if (timerRef.current) clearInterval(timerRef.current);
+
+    timerRef.current = window.setInterval(() => {
+      setElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [currentQuestion?.id]);
+
+  async function loadSession() {
+    if (!id) return;
+    setLoading(true);
+    try {
+      const data = await interviewService.getInterview(id);
+      setSession(data);
+      setMode((data.mode as any) || 'text');
+
+      if (data.status === 'completed') {
+        navigate(`/reports/${data.id}`);
+        return;
+      }
+
+      setCurrentQuestion(data.current_question || null);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to load interview session.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const handleSubmitAnswer = async () => {
+    if (!currentQuestion || !answerText.trim() || submitting) return;
+    setSubmitting(true);
+    setErrorMessage(null);
+
+    try {
+      const result: Answer = await interviewService.submitAnswer(currentQuestion.id, {
+        text_answer: answerText.trim(),
+        duration_seconds: elapsedSeconds,
+        mode,
+      });
+
+      setEvaluation(result.evaluation);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to evaluate answer. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleNextQuestion = async () => {
+    if (!id) return;
+    setEvaluation(null);
+    setAnswerText('');
+    setLoading(true);
+
+    try {
+      // Reload session to inspect round statuses
+      const updatedSession = await interviewService.getInterview(id);
+      setSession(updatedSession);
+
+      if (updatedSession.status === 'completed') {
+        navigate(`/reports/${updatedSession.id}`);
+        return;
+      }
+
+      const nextQ = await interviewService.getNextQuestion(id);
+      if (nextQ) {
+        setCurrentQuestion(nextQ);
+      } else {
+        // If no more questions returned, complete interview
+        const finalSession = await interviewService.completeInterview(id);
+        navigate(`/reports/${finalSession.id}`);
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error proceeding to next question.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const formatTimer = (totalSeconds: number) => {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  if (loading && !session) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-slate-400 text-sm">Entering interview room...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-16 text-center space-y-4">
+        <AlertCircle className="w-10 h-10 text-red-400 mx-auto" />
+        <h2 className="text-xl font-bold text-white">Interview Not Found</h2>
+        <p className="text-slate-400 text-sm">{errorMessage}</p>
+      </div>
+    );
+  }
+
+  const currentRound = session.current_round;
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      {/* Top Header & Round Progress Bar */}
+      <div className="bg-slate-800/60 border border-slate-700/80 rounded-3xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center space-x-2">
+            <span className="text-xs uppercase font-mono font-bold text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/20">
+              ROUND {currentRound?.round_order || 1} OF {session.rounds.length}
+            </span>
+            <span className="font-bold text-white text-base">
+              {currentRound?.name || currentRound?.round_type || 'Interview Round'}
+            </span>
+          </div>
+          <p className="text-xs text-slate-400">{currentRound?.objective}</p>
+        </div>
+
+        {/* Mode Selector & Timer */}
+        <div className="flex items-center space-x-3 w-full md:w-auto justify-between md:justify-end">
+          <div className="flex items-center space-x-1 bg-slate-900/80 p-1 rounded-xl border border-slate-700/80">
+            <button
+              onClick={() => setMode('text')}
+              className={`p-1.5 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all ${
+                mode === 'text' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Text</span>
+            </button>
+            <button
+              onClick={() => setMode('voice')}
+              className={`p-1.5 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all ${
+                mode === 'voice' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Voice</span>
+            </button>
+            <button
+              onClick={() => setMode('video')}
+              className={`p-1.5 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all ${
+                mode === 'video' ? 'bg-pink-600 text-white' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Video className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Video</span>
+            </button>
+          </div>
+
+          <div className="flex items-center space-x-2 bg-slate-900/80 px-3 py-1.5 rounded-xl border border-slate-700/80 text-xs font-mono text-slate-300">
+            <Clock className="w-4 h-4 text-indigo-400" />
+            <span>{formatTimer(elapsedSeconds)}</span>
+          </div>
+        </div>
+      </div>
+
+      {errorMessage && (
+        <div className="flex items-center space-x-3 p-4 rounded-xl bg-red-950/50 text-red-300 border border-red-800/70 text-sm">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
+
+      {/* Main Room Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left: Video / Media Preview if Video Mode is Active */}
+        {mode === 'video' && (
+          <div className="lg:col-span-1 space-y-4">
+            <VideoPreview isRecording={submitting} />
+            <div className="bg-slate-800/40 p-4 rounded-2xl border border-slate-700/60 text-xs text-slate-400 space-y-1">
+              <span className="font-semibold text-white block">Video Mode Active</span>
+              <p>Keep eye contact with your webcam and speak naturally. Your spoken points can also be transcribed into the answer field.</p>
+            </div>
+          </div>
+        )}
+
+        {/* Center / Right: Question Card & Answer Editor */}
+        <div className={`${mode === 'video' ? 'lg:col-span-2' : 'lg:col-span-3'} space-y-6`}>
+          {currentQuestion ? (
+            <div className="bg-slate-800/60 border border-slate-700/80 rounded-3xl p-6 sm:p-8 space-y-6 shadow-xl">
+              {/* Question Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-700/60">
+                <div className="flex items-center space-x-2">
+                  <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-400 font-mono font-bold text-xs flex items-center justify-center">
+                    Q{currentQuestion.question_number}
+                  </span>
+                  <span className="text-xs text-slate-400">
+                    Question {currentQuestion.question_number} of {currentQuestion.total_questions_in_round}
+                  </span>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <span className="text-[11px] font-mono uppercase bg-slate-900 text-slate-300 px-2.5 py-0.5 rounded-full border border-slate-700">
+                    Topic: {currentQuestion.topic}
+                  </span>
+                  <span className="text-[11px] font-mono uppercase bg-indigo-500/10 text-indigo-400 px-2.5 py-0.5 rounded-full border border-indigo-500/20">
+                    {currentQuestion.difficulty}
+                  </span>
+                </div>
+              </div>
+
+              {/* Question Text */}
+              <div className="space-y-2">
+                <h3 className="text-xl sm:text-2xl font-bold text-white leading-relaxed">
+                  {currentQuestion.question_text}
+                </h3>
+              </div>
+
+              {/* Voice Controller if in Voice Mode */}
+              {mode === 'voice' && (
+                <VoiceController
+                  questionText={currentQuestion.question_text}
+                  onTranscriptUpdate={(transcript) => setAnswerText(transcript)}
+                  isListening={isVoiceListening}
+                  setIsListening={setIsVoiceListening}
+                />
+              )}
+
+              {/* Answer Input or Evaluation Result */}
+              {!evaluation ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                      Your Response {mode === 'voice' ? '(Transcribed Speech or Type Below)' : ''}
+                    </label>
+                    <textarea
+                      value={answerText}
+                      onChange={(e) => setAnswerText(e.target.value)}
+                      rows={6}
+                      placeholder="Explain your approach, design decisions, architectural trade-offs, and technical rationale clearly..."
+                      className="w-full px-4 py-3 bg-slate-900/90 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-sans leading-relaxed"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2">
+                    <span className="text-xs text-slate-500">
+                      Take your time. Questions adapt dynamically to your answers.
+                    </span>
+
+                    <button
+                      onClick={handleSubmitAnswer}
+                      disabled={submitting || !answerText.trim()}
+                      className="inline-flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all text-sm"
+                    >
+                      {submitting ? (
+                        <div className="flex items-center space-x-2">
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          <span>Gemini is evaluating...</span>
+                        </div>
+                      ) : (
+                        <>
+                          <Send className="w-4 h-4" />
+                          <span>Submit Answer</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Instant Feedback Evaluation Card */
+                <div className="bg-slate-900/90 border border-indigo-500/40 rounded-2xl p-6 space-y-6 animate-fadeIn">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-12 h-12 rounded-xl bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center font-extrabold text-xl font-mono">
+                        {Math.round(evaluation.score)}
+                      </div>
+                      <div>
+                        <h4 className="text-white font-bold text-base">Answer Evaluation</h4>
+                        <span className="text-xs text-slate-400">
+                          Scored across technical depth, correctness, and clarity
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleNextQuestion}
+                      className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-5 py-2.5 rounded-xl shadow-lg shadow-emerald-600/30 transition-all"
+                    >
+                      <span>Proceed to Next Question</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Multi-Dimensional Metrics Bar */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                    <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                      <span className="text-[11px] text-slate-400 block">Correctness</span>
+                      <span className="text-lg font-bold text-white">{evaluation.correctness}%</span>
+                    </div>
+                    <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                      <span className="text-[11px] text-slate-400 block">Technical Depth</span>
+                      <span className="text-lg font-bold text-white">{evaluation.technical_depth}%</span>
+                    </div>
+                    <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                      <span className="text-[11px] text-slate-400 block">Relevance</span>
+                      <span className="text-lg font-bold text-white">{evaluation.relevance}%</span>
+                    </div>
+                    <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                      <span className="text-[11px] text-slate-400 block">Clarity</span>
+                      <span className="text-lg font-bold text-white">{evaluation.clarity}%</span>
+                    </div>
+                  </div>
+
+                  {/* Observations */}
+                  {evaluation.communication_observation && (
+                    <div className="text-xs text-slate-300 bg-slate-800/40 p-3.5 rounded-xl border border-slate-700/60">
+                      <span className="font-semibold text-white block mb-0.5">Observation:</span>
+                      {evaluation.communication_observation}
+                    </div>
+                  )}
+
+                  {/* Strengths & Weaknesses */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                    <div className="space-y-1.5 bg-emerald-950/20 border border-emerald-800/30 p-3.5 rounded-xl">
+                      <span className="font-bold text-emerald-400 block">Demonstrated Strengths</span>
+                      <ul className="space-y-1 list-disc list-inside text-slate-300">
+                        {evaluation.strengths.map((s, i) => (
+                          <li key={i}>{s}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="space-y-1.5 bg-amber-950/20 border border-amber-800/30 p-3.5 rounded-xl">
+                      <span className="font-bold text-amber-400 block">Areas to Reinforce</span>
+                      <ul className="space-y-1 list-disc list-inside text-slate-300">
+                        {evaluation.weaknesses.map((w, i) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* Improvement Tip */}
+                  {evaluation.improvement_tip && (
+                    <div className="p-3.5 bg-indigo-950/30 border border-indigo-800/40 rounded-xl text-xs text-indigo-200 flex items-start space-x-2">
+                      <Sparkles className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-bold block">Interview Coaching Tip:</span>
+                        <span>{evaluation.improvement_tip}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bottom Proceed Button */}
+                  <button
+                    onClick={handleNextQuestion}
+                    className="w-full flex items-center justify-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-emerald-600/20 transition-all text-sm"
+                  >
+                    <span>Proceed to Next Question / Adaptive Follow-Up</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-slate-800/60 border border-slate-700/80 rounded-3xl p-12 text-center space-y-4">
+              <Award className="w-12 h-12 text-emerald-400 mx-auto" />
+              <h3 className="text-xl font-bold text-white">All Questions Completed!</h3>
+              <p className="text-slate-400 text-sm max-w-md mx-auto">
+                Congratulations! You have completed all rounds for this interview session. Click below to view your Readiness Report.
+              </p>
+              <button
+                onClick={() => navigate(`/reports/${session.id}`)}
+                className="inline-flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-6 py-3 rounded-xl shadow-lg shadow-emerald-600/30"
+              >
+                <span>View Full Readiness Report</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+========== frontend/src/pages/ReportPage.tsx ==========
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { reportService } from '../services/reportService';
+import { practiceService } from '../services/practiceService';
+import { Report } from '../types';
+import {
+  Award,
+  Sparkles,
+  Layers,
+  ArrowRight,
+  TrendingUp,
+  AlertTriangle,
+  CheckCircle2,
+  AlertCircle,
+  PlayCircle,
+  HelpCircle,
+  BookOpen,
+} from 'lucide-react';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  Radar,
+} from 'recharts';
+
+export const ReportPage: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+
+  const [report, setReport] = useState<Report | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [launchingPractice, setLaunchingPractice] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function loadReport() {
+      if (!id) return;
+      try {
+        const data = await reportService.getReport(id);
+        setReport(data);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Failed to generate readiness report.');
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadReport();
+  }, [id]);
+
+  const handleStartPractice = async (topic: string) => {
+    if (!report) return;
+    setLaunchingPractice(topic);
+    try {
+      const session = await practiceService.startPractice({
+        topic,
+        source_report_id: report.id,
+        target_role: report.target_role,
+      });
+      navigate(`/practice`);
+    } catch (err: any) {
+      alert(`Could not start practice drill: ${err.message}`);
+    } finally {
+      setLaunchingPractice(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-slate-400 text-sm">Synthesizing comprehensive readiness report...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!report) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-16 text-center space-y-4">
+        <AlertCircle className="w-10 h-10 text-red-400 mx-auto" />
+        <h2 className="text-xl font-bold text-white">Report Not Found</h2>
+        <p className="text-slate-400 text-sm">{errorMessage}</p>
+        <Link to="/dashboard" className="text-xs text-indigo-400 font-semibold hover:underline">
+          Return to Dashboard
+        </Link>
+      </div>
+    );
+  }
+
+  const { overall_metrics } = report;
+
+  // Radar chart data for competencies
+  const competencyData = [
+    { subject: 'Technical Depth', score: overall_metrics.technical_depth_score, fullMark: 100 },
+    { subject: 'Problem Solving', score: overall_metrics.problem_solving_score, fullMark: 100 },
+    { subject: 'Communication', score: overall_metrics.communication_score, fullMark: 100 },
+    { subject: 'Clarity', score: overall_metrics.clarity_score, fullMark: 100 },
+    { subject: 'Overall Readiness', score: overall_metrics.readiness_score, fullMark: 100 },
+  ];
+
+  // Bar chart data for rounds
+  const roundChartData = overall_metrics.round_metrics.map((rm) => ({
+    name: `R${rm.round_order}: ${rm.round_name.substring(0, 15)}...`,
+    score: rm.score,
+  }));
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
+      {/* Top Banner */}
+      <div className="bg-gradient-to-r from-indigo-950 via-slate-800 to-purple-950 border border-slate-700/80 rounded-3xl p-6 sm:p-8 backdrop-blur-md flex flex-col md:flex-row items-start md:items-center justify-between gap-6 shadow-xl">
+        <div className="space-y-2">
+          <div className="inline-flex items-center space-x-2 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider">
+            <Award className="w-3.5 h-3.5" />
+            <span>Interview Readiness Practice Report</span>
+          </div>
+          <h1 className="text-3xl font-extrabold text-white">{report.target_role}</h1>
+          <p className="text-xs text-slate-400">
+            Educational Diagnostic Assessment • {overall_metrics.total_questions_answered} questions analyzed • Not a hiring prediction
+          </p>
+        </div>
+
+        {/* Big Readiness Score Ring */}
+        <div className="flex items-center space-x-4 bg-slate-900/80 p-4 rounded-2xl border border-slate-700/80 shadow-lg">
+          <div className="w-16 h-16 rounded-2xl bg-indigo-600/20 border-2 border-indigo-500 flex flex-col items-center justify-center font-mono">
+            <span className="text-2xl font-extrabold text-white">{Math.round(overall_metrics.readiness_score)}</span>
+            <span className="text-[10px] text-indigo-300">/ 100</span>
+          </div>
+          <div>
+            <span className="text-xs font-semibold text-slate-400 block uppercase tracking-wider">
+              Readiness Score
+            </span>
+            <span className="text-xs text-slate-300 font-medium">
+              {overall_metrics.readiness_score >= 80
+                ? 'Strong Interview Preparedness'
+                : overall_metrics.readiness_score >= 65
+                ? 'Promising • Specific Gaps Identified'
+                : 'Foundational • Drills Recommended'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Analytics Charts Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Radar Chart: Core Competencies */}
+        <div className="bg-slate-800/60 border border-slate-700/80 rounded-3xl p-6 space-y-4">
+          <h2 className="text-base font-bold text-white flex items-center space-x-2">
+            <TrendingUp className="w-4 h-4 text-indigo-400" />
+            <span>Competency Radar Breakdown</span>
+          </h2>
+
+          <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <RadarChart data={competencyData} outerRadius="75%">
+                <PolarGrid stroke="#334155" />
+                <PolarAngleAxis dataKey="subject" stroke="#94a3b8" tick={{ fontSize: 11 }} />
+                <PolarRadiusAxis angle={30} domain={[0, 100]} stroke="#475569" />
+                <Radar
+                  name="Candidate"
+                  dataKey="score"
+                  stroke="#6366f1"
+                  fill="#6366f1"
+                  fillOpacity={0.4}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#0f172a',
+                    borderColor: '#334155',
+                    borderRadius: '0.75rem',
+                    color: '#f8fafc',
+                    fontSize: '12px',
+                  }}
+                />
+              </RadarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Bar Chart: Round by Round Performance */}
+        <div className="bg-slate-800/60 border border-slate-700/80 rounded-3xl p-6 space-y-4">
+          <h2 className="text-base font-bold text-white flex items-center space-x-2">
+            <Layers className="w-4 h-4 text-purple-400" />
+            <span>Round-Wise Performance</span>
+          </h2>
+
+          <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={roundChartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="name" stroke="#94a3b8" tick={{ fontSize: 10 }} />
+                <YAxis domain={[0, 100]} stroke="#94a3b8" tick={{ fontSize: 11 }} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#0f172a',
+                    borderColor: '#334155',
+                    borderRadius: '0.75rem',
+                    color: '#f8fafc',
+                    fontSize: '12px',
+                  }}
+                />
+                <Bar dataKey="score" fill="#8b5cf6" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      {/* Strengths & Weaknesses Observations */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-slate-800/60 border border-emerald-900/40 rounded-3xl p-6 space-y-3">
+          <div className="flex items-center space-x-2 text-emerald-400 font-bold text-base">
+            <CheckCircle2 className="w-5 h-5" />
+            <span>Demonstrated Key Strengths</span>
+          </div>
+          <ul className="space-y-2 text-xs text-slate-300">
+            {report.strengths.map((str, idx) => (
+              <li key={idx} className="flex items-start space-x-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0"></span>
+                <span>{str}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="bg-slate-800/60 border border-amber-900/40 rounded-3xl p-6 space-y-3">
+          <div className="flex items-center space-x-2 text-amber-400 font-bold text-base">
+            <AlertTriangle className="w-5 h-5" />
+            <span>Identified Growth & Reinforcement Areas</span>
+          </div>
+          <ul className="space-y-2 text-xs text-slate-300">
+            {report.weaknesses.map((w, idx) => (
+              <li key={idx} className="flex items-start space-x-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 flex-shrink-0"></span>
+                <span>{w}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      {/* Weakness-to-Practice Loop Action Plan */}
+      <div className="bg-slate-800/60 border border-slate-700/80 rounded-3xl p-6 sm:p-8 space-y-6">
+        <div>
+          <div className="inline-flex items-center space-x-2 bg-purple-500/10 text-purple-400 border border-purple-500/20 px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider mb-2">
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Targeted Weakness-to-Practice Loop</span>
+          </div>
+          <h2 className="text-xl font-bold text-white">Your Personalized Practice Roadmap</h2>
+          <p className="text-slate-400 text-xs mt-1">
+            Don't let identified weaknesses cost you your real interview. Click any topic below to immediately run rapid AI practice drills.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {report.practice_plan.map((item, idx) => (
+            <div
+              key={idx}
+              className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-5 space-y-3 flex flex-col justify-between"
+            >
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white text-sm">{item.topic}</span>
+                  <span
+                    className={`text-[10px] uppercase font-mono font-bold px-2 py-0.5 rounded ${
+                      item.priority === 'High'
+                        ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                        : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                    }`}
+                  >
+                    {item.priority} Priority
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300">{item.reason}</p>
+
+                <div className="space-y-1 pt-1">
+                  <span className="text-[11px] font-semibold text-slate-400">Suggested Action:</span>
+                  <ul className="text-xs text-slate-400 space-y-0.5 list-disc list-inside">
+                    {item.suggested_actions.map((act, ai) => (
+                      <li key={ai}>{act}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+
+              <button
+                onClick={() => handleStartPractice(item.topic)}
+                disabled={launchingPractice === item.topic}
+                className="w-full inline-flex items-center justify-center space-x-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold py-2.5 px-4 rounded-xl shadow-md shadow-indigo-600/20 transition-all mt-2"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>
+                  {launchingPractice === item.topic ? 'Generating Drill...' : `Practice "${item.topic}" Now`}
+                </span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Action Footer */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-800">
+        <Link
+          to="/dashboard"
+          className="text-xs text-slate-400 hover:text-white font-medium"
+        >
+          &larr; Back to Dashboard
+        </Link>
+        <Link
+          to="/setup"
+          className="inline-flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-5 py-2.5 rounded-xl border border-slate-700"
+        >
+          <PlayCircle className="w-4 h-4 text-indigo-400" />
+          <span>Launch Another Interview</span>
+        </Link>
+      </div>
+    </div>
+  );
+};
+
+========== backend/app/api/blueprints.py ==========
+import json
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from backend.app.core.database import get_db
+from backend.app.models.models import User, InterviewBlueprint
+from backend.app.schemas.blueprint import (
+    BlueprintGenerateRequest,
+    BlueprintResponse,
+    BlueprintData,
+)
+from backend.app.services.auth_service import get_current_user
+from backend.app.services.blueprint_service import generate_interview_blueprint
+
+router = APIRouter(prefix="/api/blueprints", tags=["Blueprints"])
+
+@router.post("", response_model=BlueprintResponse, status_code=status.HTTP_201_CREATED)
+async def create_blueprint(
+    request: BlueprintGenerateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    blueprint = await generate_interview_blueprint(request, current_user.id, db)
+    blueprint_dict = json.loads(blueprint.blueprint_json)
+    return BlueprintResponse(
+        id=blueprint.id,
+        target_role=blueprint.target_role,
+        resume_id=blueprint.resume_id,
+        jd_text=blueprint.jd_text,
+        blueprint=BlueprintData(**blueprint_dict),
+        created_at=blueprint.created_at
+    )
+
+@router.get("/{id}", response_model=BlueprintResponse)
+def get_blueprint(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    blueprint = db.query(InterviewBlueprint).filter(
+        InterviewBlueprint.id == id,
+        InterviewBlueprint.user_id == current_user.id
+    ).first()
+    if not blueprint:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blueprint not found.")
+
+    blueprint_dict = json.loads(blueprint.blueprint_json)
+    return BlueprintResponse(
+        id=blueprint.id,
+        target_role=blueprint.target_role,
+        resume_id=blueprint.resume_id,
+        jd_text=blueprint.jd_text,
+        blueprint=BlueprintData(**blueprint_dict),
+        created_at=blueprint.created_at
+    )
+
+@router.get("", response_model=List[BlueprintResponse])
+def list_blueprints(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    blueprints = (
+        db.query(InterviewBlueprint)
+        .filter(InterviewBlueprint.user_id == current_user.id)
+        .order_by(InterviewBlueprint.created_at.desc())
+        .all()
+    )
+    result = []
+    for b in blueprints:
+        try:
+            blueprint_dict = json.loads(b.blueprint_json)
+            result.append(BlueprintResponse(
+                id=b.id,
+                target_role=b.target_role,
+                resume_id=b.resume_id,
+                jd_text=b.jd_text,
+                blueprint=BlueprintData(**blueprint_dict),
+                created_at=b.created_at
+            ))
+        except Exception:
+            continue
+    return result
+
+========== backend/app/services/blueprint_service.py ==========
+import json
+import logging
+from typing import Optional, Dict, Any
+from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
+from backend.app.models.models import InterviewBlueprint, Resume
+from backend.app.schemas.blueprint import (
+    BlueprintGenerateRequest,
+    BlueprintData,
+)
+from backend.app.prompts.blueprint import (
+    BLUEPRINT_SYSTEM_PROMPT,
+    build_blueprint_prompt,
+)
+from backend.app.services.gemini_service import gemini_service
+
+logger = logging.getLogger(__name__)
+
+async def generate_interview_blueprint(
+    request: BlueprintGenerateRequest,
+    user_id: str,
+    db: Session
+) -> InterviewBlueprint:
+    """Generates every interview blueprint using the configured Gemini API."""
+    candidate_profile = None
+    if request.resume_id:
+        resume = db.query(Resume).filter(Resume.id == request.resume_id, Resume.user_id == user_id).first()
+        if not resume:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found.")
+        if resume.parsed_profile_json:
+            try:
+                candidate_profile = json.loads(resume.parsed_profile_json)
+            except (TypeError, json.JSONDecodeError) as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="The selected resume profile could not be read. Please review or re-upload it."
+                ) from e
+
+    prompt = build_blueprint_prompt(
+        target_role=request.target_role,
+        experience_level=request.experience_level,
+        candidate_profile=candidate_profile,
+        jd_text=request.jd_text,
+        template_type=request.template_type
+    )
+    try:
+        raw_blueprint = await gemini_service.generate_structured_json(
+            system_prompt=BLUEPRINT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.2
+        )
+        blueprint_data = BlueprintData(**raw_blueprint)
+    except Exception as e:
+        logger.error("Gemini blueprint generation failed (%s).", type(e).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Interview blueprint generation failed: {e}"
+        ) from e
+    # Validate rounds server-side
+    if not blueprint_data.rounds or len(blueprint_data.rounds) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Generated blueprint has no interview rounds."
+        )
+
+    # Store in database
+    db_blueprint = InterviewBlueprint(
+        user_id=user_id,
+        resume_id=request.resume_id,
+        target_role=request.target_role,
+        jd_text=request.jd_text,
+        blueprint_json=blueprint_data.model_dump_json()
+    )
+    db.add(db_blueprint)
+    db.commit()
+    db.refresh(db_blueprint)
+
+    return db_blueprint
+
+========== backend/app/services/interview_service.py ==========
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List, Tuple
+from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
+from backend.app.models.models import (
+    InterviewSession,
+    InterviewRound,
+    Question,
+    Answer,
+    InterviewBlueprint,
+    Resume,
+    Report,
+    PracticeSession,
+)
+from backend.app.schemas.interview import (
+    InterviewSessionCreateRequest,
+    AnswerSubmitRequest,
+    AnswerEvaluation,
+    QuestionResponse,
+    InterviewRoundResponse,
+    InterviewSessionDetailResponse,
+)
+from backend.app.prompts.question_generation import (
+    QUESTION_SYSTEM_PROMPT,
+    build_question_prompt,
+)
+from backend.app.prompts.follow_up import (
+    ADAPTIVE_QUESTION_SYSTEM_PROMPT,
+    build_adaptive_question_prompt,
+)
+from backend.app.prompts.answer_evaluation import (
+    EVALUATION_SYSTEM_PROMPT,
+    build_answer_evaluation_prompt,
+)
+from backend.app.services.gemini_service import gemini_service
+
+logger = logging.getLogger(__name__)
+
+def get_candidate_profile(blueprint: InterviewBlueprint, db: Session) -> Optional[Dict[str, Any]]:
+    if blueprint.resume_id:
+        resume = db.query(Resume).filter(Resume.id == blueprint.resume_id).first()
+        if resume and resume.parsed_profile_json:
+            try:
+                return json.loads(resume.parsed_profile_json)
+            except Exception:
+                pass
+    return None
+
+async def create_interview_session(
+    request: InterviewSessionCreateRequest,
+    user_id: str,
+    db: Session
+) -> InterviewSession:
+    blueprint = db.query(InterviewBlueprint).filter(
+        InterviewBlueprint.id == request.blueprint_id,
+        InterviewBlueprint.user_id == user_id
+    ).first()
+
+    if not blueprint:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Interview blueprint not found or unauthorized."
+        )
+
+    blueprint_data = json.loads(blueprint.blueprint_json)
+    rounds_config = blueprint_data.get("rounds", [])
+
+    if not rounds_config:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Blueprint has no configured rounds."
+        )
+
+    # Create interview session
+    session = InterviewSession(
+        user_id=user_id,
+        blueprint_id=blueprint.id,
+        status="in_progress",
+        mode=request.mode or "text",
+        started_at=datetime.now(timezone.utc)
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    # Initialize interview rounds
+    for index, r in enumerate(rounds_config):
+        round_status = "in_progress" if index == 0 else "pending"
+        interview_round = InterviewRound(
+            session_id=session.id,
+            round_type=r.get("round_type", "technical"),
+            round_order=index + 1,
+            status=round_status,
+            score=None
+        )
+        db.add(interview_round)
+    db.commit()
+    db.refresh(session)
+
+    return session
+
+async def get_or_generate_current_question(
+    session_id: str,
+    user_id: str,
+    db: Session
+) -> Tuple[Optional[Question], int, int]:
+    """
+    Finds the active round and either returns the pending unanswered question
+    or adaptively generates the next question.
+    Returns: (question, current_question_number, total_questions_in_round)
+    """
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == user_id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview session not found.")
+
+    if session.status == "completed":
+        return None, 0, 0
+
+    # Find the current active round
+    active_round = db.query(InterviewRound).filter(
+        InterviewRound.session_id == session.id,
+        InterviewRound.status == "in_progress"
+    ).order_by(InterviewRound.round_order).first()
+
+    if not active_round:
+        # Check if there is a pending round to activate
+        pending_round = db.query(InterviewRound).filter(
+            InterviewRound.session_id == session.id,
+            InterviewRound.status == "pending"
+        ).order_by(InterviewRound.round_order).first()
+
+        if pending_round:
+            pending_round.status = "in_progress"
+            db.commit()
+            active_round = pending_round
+        else:
+            # All rounds complete!
+            session.status = "completed"
+            session.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return None, 0, 0
+
+    # Get blueprint config for this round
+    blueprint = db.query(InterviewBlueprint).filter(InterviewBlueprint.id == session.blueprint_id).first()
+    blueprint_data = json.loads(blueprint.blueprint_json)
+    rounds_config = blueprint_data.get("rounds", [])
+    
+    round_index = active_round.round_order - 1
+    round_config = rounds_config[round_index] if round_index < len(rounds_config) else {}
+
+    target_question_count = round_config.get("question_count", 3)
+    round_name = round_config.get("name", active_round.round_type.title())
+    round_objective = round_config.get("objective", "Evaluate candidate skills")
+    topics = round_config.get("topics", [active_round.round_type])
+    base_difficulty = round_config.get("difficulty", "medium")
+
+    # Get existing questions for this round
+    existing_questions = db.query(Question).filter(Question.round_id == active_round.id).all()
+
+    # Check if there is an existing unanswered question
+    for q in existing_questions:
+        answered = db.query(Answer).filter(Answer.question_id == q.id).first()
+        if not answered:
+            return q, len(existing_questions), target_question_count
+
+    # If all target questions for this round have been answered, complete this round and recurse
+    if len(existing_questions) >= target_question_count:
+        active_round.status = "completed"
+        # Calculate round average score
+        answers = (
+            db.query(Answer)
+            .join(Question)
+            .filter(Question.round_id == active_round.id)
+            .all()
+        )
+        scores = []
+        for ans in answers:
+            try:
+                ev = json.loads(ans.evaluation_json)
+                scores.append(float(ev["score"]))
+            except Exception:
+                pass
+        active_round.score = round(sum(scores) / len(scores), 1) if scores else None
+        db.commit()
+
+        # Recurse to move to next round
+        return await get_or_generate_current_question(session_id, user_id, db)
+
+    # Otherwise, generate the next question adaptively!
+    current_q_num = len(existing_questions) + 1
+    candidate_profile = get_candidate_profile(blueprint, db)
+    previous_question_texts = [q.question_text for q in existing_questions]
+
+    # Adaptive follow-up logic if there was a previous answer in this round
+    last_answered_q = existing_questions[-1] if existing_questions else None
+    last_answer = (
+        db.query(Answer).filter(Answer.question_id == last_answered_q.id).first()
+        if last_answered_q else None
+    )
+
+    new_q_data = None
+
+    if last_answer and last_answer.evaluation_json:
+        try:
+            last_eval = json.loads(last_answer.evaluation_json)
+            last_score = float(last_eval["score"])
+            
+            # Rule-based difficulty progression policy
+            if last_score >= 80:
+                adjusted_difficulty = "hard"
+            elif last_score < 50:
+                adjusted_difficulty = "easy"
+            else:
+                adjusted_difficulty = base_difficulty
+
+            follow_up_prompt = build_adaptive_question_prompt(
+                previous_question=last_answered_q.question_text,
+                candidate_answer=last_answer.text_answer,
+                evaluation=last_eval,
+                round_name=round_name,
+                round_type=active_round.round_type,
+                round_topics=topics,
+                current_difficulty=adjusted_difficulty,
+                question_index=current_q_num,
+                total_questions=target_question_count,
+                target_role=blueprint.target_role
+            )
+            new_q_data = await gemini_service.generate_structured_json(
+                system_prompt=ADAPTIVE_QUESTION_SYSTEM_PROMPT,
+                user_prompt=follow_up_prompt,
+                temperature=0.3
+            )
+        except Exception as e:
+            logger.warning(f"Adaptive question generation failed, using standard generator: {e}")
+
+    if not new_q_data:
+        standard_prompt = build_question_prompt(
+            round_name=round_name,
+            round_type=active_round.round_type,
+            round_objective=round_objective,
+            topics=topics,
+            difficulty=base_difficulty,
+            target_role=blueprint.target_role,
+            candidate_profile=candidate_profile,
+            previous_questions=previous_question_texts,
+            question_index=current_q_num,
+            total_questions=target_question_count
+        )
+        try:
+            new_q_data = await gemini_service.generate_structured_json(
+                system_prompt=QUESTION_SYSTEM_PROMPT,
+                user_prompt=standard_prompt,
+                temperature=0.3
+            )
+        except Exception as e:
+            logger.error(f"Gemini question generation failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Gemini could not generate a question. Please check server configuration and retry."
+            )
+
+    # Save question to DB
+    new_question = Question(
+        round_id=active_round.id,
+        question_text=new_q_data.get("question", "Describe your experience and approach to solving this technical problem."),
+        question_type=new_q_data.get("type", "conceptual"),
+        difficulty=new_q_data.get("difficulty", base_difficulty),
+        topic=new_q_data.get("topic", topics[0] if topics else active_round.round_type),
+        metadata_json=json.dumps({
+            "expected_concepts": new_q_data.get("expected_concepts", []),
+            "round_name": round_name
+        })
+    )
+    db.add(new_question)
+    db.commit()
+    db.refresh(new_question)
+
+    return new_question, current_q_num, target_question_count
+
+async def submit_answer_and_evaluate(
+    session_id: str,
+    question_id: str,
+    request: AnswerSubmitRequest,
+    user_id: str,
+    db: Session
+) -> Tuple[Answer, AnswerEvaluation, bool]:
+    """
+    Submits candidate answer, calls Gemini for multi-dimensional evaluation,
+    saves the evaluation, and checks if session/round is completed.
+    Returns: (Answer, AnswerEvaluation, is_round_or_session_completed)
+    """
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == user_id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found.")
+
+    # Prevent duplicate submission for same question
+    existing_answer = db.query(Answer).filter(Answer.question_id == question.id).first()
+    if existing_answer:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Question has already been answered.")
+
+    blueprint = db.query(InterviewBlueprint).filter(InterviewBlueprint.id == session.blueprint_id).first()
+    meta = json.loads(question.metadata_json or "{}")
+    expected_concepts = meta.get("expected_concepts", [])
+
+    # Evaluate via Gemini
+    prompt = build_answer_evaluation_prompt(
+        question_text=question.question_text,
+        question_topic=question.topic,
+        expected_concepts=expected_concepts,
+        candidate_answer=request.text_answer,
+        target_role=blueprint.target_role,
+        mode=request.mode or session.mode
+    )
+
+    try:
+        eval_raw = await gemini_service.generate_structured_json(
+            system_prompt=EVALUATION_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.1
+        )
+        evaluation = AnswerEvaluation(**eval_raw)
+    except Exception as e:
+        logger.error("Answer evaluation failed (%s).", type(e).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Answer evaluation failed. Your answer was not saved; please retry."
+        ) from e
+
+    # Save answer
+    answer = Answer(
+        question_id=question.id,
+        user_id=user_id,
+        text_answer=request.text_answer,
+        transcript=request.transcript,
+        duration_seconds=request.duration_seconds or 0.0,
+        evaluation_json=evaluation.model_dump_json()
+    )
+    db.add(answer)
+    db.commit()
+    db.refresh(answer)
+
+    # Check round completion
+    round_obj = db.query(InterviewRound).filter(InterviewRound.id == question.round_id).first()
+    blueprint_data = json.loads(blueprint.blueprint_json)
+    rounds_config = blueprint_data.get("rounds", [])
+    round_idx = round_obj.round_order - 1
+    target_count = rounds_config[round_idx].get("question_count", 3) if round_idx < len(rounds_config) else 3
+
+    answered_count = (
+        db.query(Answer)
+        .join(Question)
+        .filter(Question.round_id == round_obj.id)
+        .count()
+    )
+
+    is_completed = answered_count >= target_count
+    if is_completed:
+        round_obj.status = "completed"
+        # Calculate round average score
+        answers = (
+            db.query(Answer)
+            .join(Question)
+            .filter(Question.round_id == round_obj.id)
+            .all()
+        )
+        scores = []
+        for ans in answers:
+            try:
+                ev = json.loads(ans.evaluation_json)
+                scores.append(float(ev["score"]))
+            except Exception:
+                pass
+        round_obj.score = round(sum(scores) / len(scores), 1) if scores else None
+        db.commit()
+
+    return answer, evaluation, is_completed
+
+========== backend/app/services/report_service.py ==========
+import json
+import logging
+from typing import Optional, Dict, Any, List
+from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
+from backend.app.models.models import (
+    InterviewSession,
+    InterviewRound,
+    Question,
+    Answer,
+    Report,
+    InterviewBlueprint,
+)
+from backend.app.schemas.report import (
+    ReportResponse,
+    OverallMetrics,
+    RoundMetric,
+    TopicMetric,
+    PracticePlanItem,
+)
+from backend.app.prompts.final_report import (
+    FINAL_REPORT_SYSTEM_PROMPT,
+    build_final_report_prompt,
+)
+from backend.app.services.gemini_service import gemini_service
+
+logger = logging.getLogger(__name__)
+
+async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> ReportResponse:
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == session_id,
+        InterviewSession.user_id == user_id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+
+    # Check if report already generated
+    existing_report = db.query(Report).filter(Report.session_id == session.id).first()
+    if existing_report:
+        blueprint = db.query(InterviewBlueprint).filter(InterviewBlueprint.id == session.blueprint_id).first()
+        return ReportResponse(
+            id=existing_report.id,
+            session_id=session.id,
+            target_role=blueprint.target_role,
+            overall_metrics=OverallMetrics(**json.loads(existing_report.overall_metrics_json)),
+            weaknesses=json.loads(existing_report.weaknesses_json),
+            strengths=json.loads(existing_report.overall_metrics_json).get("strengths", []),
+            recommendations=json.loads(existing_report.recommendations_json),
+            practice_plan=[
+                PracticePlanItem(**p) for p in json.loads(existing_report.overall_metrics_json).get("practice_plan", [])
+            ],
+            created_at=existing_report.created_at
+        )
+
+    # Fetch all rounds, questions, answers
+    rounds = db.query(InterviewRound).filter(InterviewRound.session_id == session.id).order_by(InterviewRound.round_order).all()
+    blueprint = db.query(InterviewBlueprint).filter(InterviewBlueprint.id == session.blueprint_id).first()
+    blueprint_data = json.loads(blueprint.blueprint_json)
+    rounds_config = blueprint_data.get("rounds", [])
+
+    rounds_data_summary = []
+    evaluations_summary = []
+    round_metrics: List[RoundMetric] = []
+    topic_scores: Dict[str, List[float]] = {}
+    total_duration = 0.0
+    all_scores: List[float] = []
+    tech_depth_scores: List[float] = []
+    comm_scores: List[float] = []
+    clarity_scores: List[float] = []
+    correctness_scores: List[float] = []
+
+    for r in rounds:
+        round_cfg = rounds_config[r.round_order - 1] if (r.round_order - 1) < len(rounds_config) else {}
+        round_name = round_cfg.get("name", r.round_type.title())
+
+        questions = db.query(Question).filter(Question.round_id == r.id).all()
+        round_evals = []
+        round_strengths = []
+        round_weaknesses = []
+
+        for q in questions:
+            ans = db.query(Answer).filter(Answer.question_id == q.id).first()
+            if ans and ans.evaluation_json:
+                total_duration += ans.duration_seconds
+                try:
+                    ev = json.loads(ans.evaluation_json)
+                    score = float(ev["score"])
+                    all_scores.append(score)
+                    tech_depth_scores.append(float(ev["technical_depth"]))
+                    comm_scores.append(float(ev["relevance"]))
+                    clarity_scores.append(float(ev["clarity"]))
+                    correctness_scores.append(float(ev["correctness"]))
+
+                    topic = q.topic or r.round_type
+                    topic_scores.setdefault(topic, []).append(score)
+
+                    round_strengths.extend(ev["strengths"])
+                    round_weaknesses.extend(ev["weaknesses"])
+
+                    round_evals.append({
+                        "question": q.question_text,
+                        "topic": q.topic,
+                        "difficulty": q.difficulty,
+                        "answer_snippet": ans.text_answer[:200],
+                        "score": score,
+                        "weakness_tags": ev.get("weakness_tags", [])
+                    })
+                except Exception:
+                    pass
+
+        round_avg = round(sum([e["score"] for e in round_evals]) / len(round_evals), 1) if round_evals else 0.0
+        round_metrics.append(RoundMetric(
+            round_order=r.round_order,
+            round_type=r.round_type,
+            round_name=round_name,
+            score=round_avg,
+            total_questions=len(questions),
+            key_strengths=list(set(round_strengths))[:3],
+            areas_for_growth=list(set(round_weaknesses))[:3]
+        ))
+
+        rounds_data_summary.append({
+            "round_order": r.round_order,
+            "round_name": round_name,
+            "score": round_avg,
+            "questions_count": len(questions)
+        })
+        evaluations_summary.extend(round_evals)
+
+    if not all_scores:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="There are no evaluated answers to report yet. Complete an interview question first."
+        )
+
+    # Calculate metrics only from saved, real Gemini evaluations.
+    readiness_score = round(sum(all_scores) / len(all_scores), 1)
+    tech_depth_score = round(sum(tech_depth_scores) / len(tech_depth_scores), 1)
+    comm_score = round(sum(comm_scores) / len(comm_scores), 1)
+    prob_score = round(sum(correctness_scores) / len(correctness_scores), 1)
+    clarity_score = round(sum(clarity_scores) / len(clarity_scores), 1)
+
+    topic_metrics: List[TopicMetric] = []
+    for topic, scores in topic_scores.items():
+        avg = round(sum(scores) / len(scores), 1)
+        st = "strong" if avg >= 80 else ("satisfactory" if avg >= 60 else "needs_practice")
+        topic_metrics.append(TopicMetric(topic=topic, score=avg, status=st))
+
+    # Generate synthesized insights via Gemini
+    prompt = build_final_report_prompt(
+        target_role=blueprint.target_role,
+        rounds_data=rounds_data_summary,
+        evaluations_data=evaluations_summary
+    )
+
+    try:
+        report_ai = await gemini_service.generate_structured_json(
+            system_prompt=FINAL_REPORT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.2
+        )
+        strengths = report_ai.get("strengths", [])
+        weaknesses = report_ai.get("weaknesses", [])
+        recommendations = report_ai.get("recommendations", [])
+        raw_plan = report_ai.get("practice_plan", [])
+        practice_plan = [PracticePlanItem(**p) for p in raw_plan]
+    except Exception as e:
+        logger.error("Final report generation failed (%s).", type(e).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Final report generation failed. Please retry."
+        ) from e
+
+    overall_metrics = OverallMetrics(
+        readiness_score=readiness_score,
+        technical_depth_score=tech_depth_score,
+        communication_score=comm_score,
+        problem_solving_score=prob_score,
+        clarity_score=clarity_score,
+        total_questions_answered=len(all_scores),
+        total_duration_seconds=total_duration,
+        round_metrics=round_metrics,
+        topic_metrics=topic_metrics
+    )
+
+    overall_dict = overall_metrics.model_dump()
+    overall_dict["strengths"] = strengths
+    overall_dict["practice_plan"] = [p.model_dump() for p in practice_plan]
+
+    # Save to DB
+    db_report = Report(
+        session_id=session.id,
+        overall_metrics_json=json.dumps(overall_dict),
+        weaknesses_json=json.dumps(weaknesses),
+        recommendations_json=json.dumps(recommendations)
+    )
+    db.add(db_report)
+    db.commit()
+    db.refresh(db_report)
+
+    return ReportResponse(
+        id=db_report.id,
+        session_id=session.id,
+        target_role=blueprint.target_role,
+        overall_metrics=overall_metrics,
+        weaknesses=weaknesses,
+        strengths=strengths,
+        recommendations=recommendations,
+        practice_plan=practice_plan,
+        created_at=db_report.created_at
+    )
+
+========== backend/app/api/interviews.py ==========
+import json
+from datetime import datetime, timezone
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from backend.app.core.database import get_db
+from backend.app.models.models import (
+    User,
+    InterviewSession,
+    InterviewRound,
+    Question,
+    Answer,
+    InterviewBlueprint,
+)
+from backend.app.schemas.interview import (
+    InterviewSessionCreateRequest,
+    InterviewSessionDetailResponse,
+    InterviewRoundResponse,
+    QuestionResponse,
+    AnswerSubmitRequest,
+    AnswerResponse,
+    AnswerEvaluation,
+)
+from backend.app.services.auth_service import get_current_user
+from backend.app.services.interview_service import (
+    create_interview_session,
+    get_or_generate_current_question,
+    submit_answer_and_evaluate,
+)
+
+router = APIRouter(tags=["Interviews"])
+
+@router.post("/api/interviews", response_model=InterviewSessionDetailResponse, status_code=status.HTTP_201_CREATED)
+async def start_interview(
+    request: InterviewSessionCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    session = await create_interview_session(request, current_user.id, db)
+    return await get_session_details(session.id, current_user, db)
+
+@router.get("/api/interviews", response_model=List[InterviewSessionDetailResponse])
+async def list_interviews(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    sessions = (
+        db.query(InterviewSession)
+        .filter(InterviewSession.user_id == current_user.id)
+        .order_by(InterviewSession.started_at.desc())
+        .all()
+    )
+    results = []
+    for s in sessions:
+        results.append(await get_session_details(s.id, current_user, db))
+    return results
+
+@router.get("/api/interviews/{id}", response_model=InterviewSessionDetailResponse)
+async def get_session_details(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == id,
+        InterviewSession.user_id == current_user.id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview session not found.")
+
+    blueprint = db.query(InterviewBlueprint).filter(InterviewBlueprint.id == session.blueprint_id).first()
+    blueprint_data = json.loads(blueprint.blueprint_json) if blueprint else {"rounds": []}
+    rounds_config = blueprint_data.get("rounds", [])
+
+    rounds = db.query(InterviewRound).filter(InterviewRound.session_id == session.id).order_by(InterviewRound.round_order).all()
+
+    round_responses: List[InterviewRoundResponse] = []
+    current_round_resp: Optional[InterviewRoundResponse] = None
+
+    for r in rounds:
+        round_cfg = rounds_config[r.round_order - 1] if (r.round_order - 1) < len(rounds_config) else {}
+        total_q = round_cfg.get("question_count", 3)
+        completed_q = db.query(Answer).join(Question).filter(Question.round_id == r.id).count()
+
+        resp = InterviewRoundResponse(
+            id=r.id,
+            round_type=r.round_type,
+            round_order=r.round_order,
+            status=r.status,
+            score=r.score,
+            name=round_cfg.get("name", r.round_type.title()),
+            objective=round_cfg.get("objective", ""),
+            question_count=total_q,
+            completed_question_count=completed_q
+        )
+        round_responses.append(resp)
+        if r.status == "in_progress" and not current_round_resp:
+            current_round_resp = resp
+
+    # Get active or next question if in progress
+    current_q_resp = None
+    if session.status == "in_progress":
+        q_obj, q_num, total_in_round = await get_or_generate_current_question(session.id, current_user.id, db)
+        if q_obj:
+            meta = json.loads(q_obj.metadata_json or "{}")
+            current_q_resp = QuestionResponse(
+                id=q_obj.id,
+                round_id=q_obj.round_id,
+                question_text=q_obj.question_text,
+                question_type=q_obj.question_type,
+                difficulty=q_obj.difficulty,
+                topic=q_obj.topic,
+                expected_concepts=meta.get("expected_concepts", []),
+                question_number=q_num,
+                total_questions_in_round=total_in_round
+            )
+
+    return InterviewSessionDetailResponse(
+        id=session.id,
+        blueprint_id=session.blueprint_id,
+        target_role=blueprint.target_role if blueprint else "Interview",
+        status=session.status,
+        mode=session.mode,
+        started_at=session.started_at,
+        completed_at=session.completed_at,
+        rounds=round_responses,
+        current_round=current_round_resp,
+        current_question=current_q_resp
+    )
+
+@router.post("/api/interviews/{id}/next-question", response_model=Optional[QuestionResponse])
+async def next_question(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    q_obj, q_num, total_in_round = await get_or_generate_current_question(id, current_user.id, db)
+    if not q_obj:
+        return None
+
+    meta = json.loads(q_obj.metadata_json or "{}")
+    return QuestionResponse(
+        id=q_obj.id,
+        round_id=q_obj.round_id,
+        question_text=q_obj.question_text,
+        question_type=q_obj.question_type,
+        difficulty=q_obj.difficulty,
+        topic=q_obj.topic,
+        expected_concepts=meta.get("expected_concepts", []),
+        question_number=q_num,
+        total_questions_in_round=total_in_round
+    )
+
+@router.post("/api/questions/{id}/answer", response_model=AnswerResponse)
+async def submit_answer(
+    id: str,
+    request: AnswerSubmitRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Find session from question
+    question = db.query(Question).filter(Question.id == id).first()
+    if not question:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found.")
+
+    round_obj = db.query(InterviewRound).filter(InterviewRound.id == question.round_id).first()
+    if not round_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview round not found.")
+
+    answer, evaluation, is_completed = await submit_answer_and_evaluate(
+        session_id=round_obj.session_id,
+        question_id=question.id,
+        request=request,
+        user_id=current_user.id,
+        db=db
+    )
+
+    return AnswerResponse(
+        id=answer.id,
+        question_id=answer.question_id,
+        text_answer=answer.text_answer,
+        transcript=answer.transcript,
+        duration_seconds=answer.duration_seconds,
+        evaluation=evaluation,
+        created_at=answer.created_at
+    )
+
+@router.post("/api/interviews/{id}/complete", response_model=InterviewSessionDetailResponse)
+async def complete_interview(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    session = db.query(InterviewSession).filter(
+        InterviewSession.id == id,
+        InterviewSession.user_id == current_user.id
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+
+    session.status = "completed"
+    session.completed_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return await get_session_details(session.id, current_user, db)
+
+========== backend/app/api/reports.py ==========
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from backend.app.core.database import get_db
+from backend.app.models.models import User
+from backend.app.schemas.report import ReportResponse
+from backend.app.services.auth_service import get_current_user
+from backend.app.services.report_service import get_or_generate_report
+
+router = APIRouter(prefix="/api/reports", tags=["Reports"])
+
+@router.get("/{session_id}", response_model=ReportResponse)
+async def get_report(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return await get_or_generate_report(session_id, current_user.id, db)
+
+========== backend/app/schemas/interview.py ==========
+from pydantic import BaseModel, Field, ConfigDict
+from datetime import datetime
+from typing import List, Optional, Any, Dict
+
+class InterviewSessionCreateRequest(BaseModel):
+    blueprint_id: str
+    mode: str = Field(default="text", description="text, voice, video")
+
+class QuestionResponse(BaseModel):
+    id: str
+    round_id: str
+    question_text: str
+    question_type: str
+    difficulty: str
+    topic: str
+    expected_concepts: List[str] = Field(default_factory=list)
+    question_number: int = 1
+    total_questions_in_round: int = 3
+
+class AnswerSubmitRequest(BaseModel):
+    text_answer: str = Field(..., min_length=1)
+    transcript: Optional[str] = None
+    duration_seconds: Optional[float] = 0.0
+    mode: Optional[str] = "text"
+
+class AnswerEvaluation(BaseModel):
+    score: float = Field(..., ge=0, le=100)
+    correctness: float = Field(..., ge=0, le=100)
+    relevance: float = Field(..., ge=0, le=100)
+    technical_depth: float = Field(..., ge=0, le=100)
+    clarity: float = Field(..., ge=0, le=100)
+    completeness: float = Field(..., ge=0, le=100)
+    communication_observation: Optional[str] = ""
+    confidence_observation: Optional[str] = ""
+    strengths: List[str] = Field(default_factory=list)
+    weaknesses: List[str] = Field(default_factory=list)
+    improvement_tip: str = ""
+    detected_topics: List[str] = Field(default_factory=list)
+    weakness_tags: List[str] = Field(default_factory=list)
+    follow_up_needed: bool = False
+    suggested_follow_up_direction: Optional[str] = ""
+
+class AnswerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    question_id: str
+    text_answer: str
+    transcript: Optional[str] = None
+    duration_seconds: float
+    evaluation: AnswerEvaluation
+    created_at: datetime
+
+class InterviewRoundResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    round_type: str
+    round_order: int
+    status: str
+    score: Optional[float] = None
+    name: Optional[str] = None
+    objective: Optional[str] = None
+    question_count: int = 0
+    completed_question_count: int = 0
+
+class InterviewSessionDetailResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    blueprint_id: str
+    target_role: str
+    status: str
+    mode: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    rounds: List[InterviewRoundResponse]
+    current_round: Optional[InterviewRoundResponse] = None
+    current_question: Optional[QuestionResponse] = None

@@ -20,6 +20,7 @@ import {
   Mic,
   Video,
   Award,
+  LogOut,
   Layers,
   ChevronRight,
   TrendingUp,
@@ -33,12 +34,18 @@ export const InterviewRoomPage: React.FC = () => {
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
   const [mode, setMode] = useState<'text' | 'voice' | 'video'>('text');
   const [answerText, setAnswerText] = useState('');
+  const [selectedOption, setSelectedOption] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [endingInterview, setEndingInterview] = useState(false);
   const [evaluation, setEvaluation] = useState<AnswerEvaluation | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [roundCompletedModal, setRoundCompletedModal] = useState<boolean>(false);
   const [isVoiceListening, setIsVoiceListening] = useState(false);
+  const submitLockRef = useRef(false);
+  const nextQuestionLockRef = useRef(false);
+  const nextQuestionRequestRef = useRef<Promise<Question | null> | null>(null);
+  const nextQuestionErrorRef = useRef<unknown>(null);
 
   // Timer
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -86,45 +93,68 @@ export const InterviewRoomPage: React.FC = () => {
     }
   }
 
-  const handleSubmitAnswer = async () => {
-    if (!currentQuestion || !answerText.trim() || submitting) return;
+  const handleSubmitAnswer = async (mcqAnswer?: string) => {
+    const response = currentQuestion?.question_type === 'mcq'
+      ? (mcqAnswer ?? selectedOption)
+      : answerText;
+    if (!currentQuestion || !response.trim() || submitting || submitLockRef.current) return;
+    submitLockRef.current = true;
     setSubmitting(true);
     setErrorMessage(null);
 
     try {
       const result: Answer = await interviewService.submitAnswer(currentQuestion.id, {
-        text_answer: answerText.trim(),
+        text_answer: response.trim(),
         duration_seconds: elapsedSeconds,
         mode,
       });
 
       setEvaluation(result.evaluation);
+      // Generate the next question while the candidate reviews feedback.
+      // This moves Gemini latency out of the Next button's critical path.
+      if (id) {
+        nextQuestionErrorRef.current = null;
+        nextQuestionRequestRef.current = interviewService
+          .getNextQuestion(id)
+          .catch((error) => {
+            nextQuestionErrorRef.current = error;
+            return null;
+          });
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to evaluate answer. Please try again.');
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   };
 
   const handleNextQuestion = async () => {
-    if (!id) return;
-    setEvaluation(null);
-    setAnswerText('');
+    if (!id || nextQuestionLockRef.current) return;
+    nextQuestionLockRef.current = true;
     setLoading(true);
 
     try {
-      // Reload session to inspect round statuses
-      const updatedSession = await interviewService.getInterview(id);
-      setSession(updatedSession);
-
-      if (updatedSession.status === 'completed') {
-        navigate(`/reports/${updatedSession.id}`);
-        return;
+      const request = nextQuestionRequestRef.current
+        ?? interviewService.getNextQuestion(id);
+      const nextQ = await request;
+      nextQuestionRequestRef.current = null;
+      if (nextQuestionErrorRef.current) {
+        const error = nextQuestionErrorRef.current;
+        nextQuestionErrorRef.current = null;
+        throw error;
       }
 
-      const nextQ = await interviewService.getNextQuestion(id);
       if (nextQ) {
+        if (nextQ.round_id !== currentQuestion?.round_id) {
+          // Refresh round labels/status only when moving between rounds.
+          const updatedSession = await interviewService.getInterview(id);
+          setSession(updatedSession);
+        }
         setCurrentQuestion(nextQ);
+        setEvaluation(null);
+        setAnswerText('');
+        setSelectedOption('');
       } else {
         // If no more questions returned, complete interview
         const finalSession = await interviewService.completeInterview(id);
@@ -133,7 +163,22 @@ export const InterviewRoomPage: React.FC = () => {
     } catch (err: any) {
       setErrorMessage(err.message || 'Error proceeding to next question.');
     } finally {
+      nextQuestionLockRef.current = false;
       setLoading(false);
+    }
+  };
+
+  const handleQuitInterview = async () => {
+    if (!id || endingInterview) return;
+    setEndingInterview(true);
+    setErrorMessage(null);
+    try {
+      const completedSession = await interviewService.completeInterview(id);
+      navigate(`/reports/${completedSession.id}`);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Could not end the interview. Please try again.');
+    } finally {
+      setEndingInterview(false);
     }
   };
 
@@ -143,12 +188,12 @@ export const InterviewRoomPage: React.FC = () => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  if (loading && !session) {
+  if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
         <div className="flex flex-col items-center space-y-4">
           <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-slate-400 text-sm">Entering interview room...</p>
+          <p className="text-slate-400 text-sm">{session ? 'Preparing your next question...' : 'Entering interview room...'}</p>
         </div>
       </div>
     );
@@ -165,6 +210,7 @@ export const InterviewRoomPage: React.FC = () => {
   }
 
   const currentRound = session.current_round;
+  const isMcq = currentQuestion?.question_type === 'mcq';
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -183,7 +229,7 @@ export const InterviewRoomPage: React.FC = () => {
         </div>
 
         {/* Mode Selector & Timer */}
-        <div className="flex items-center space-x-3 w-full md:w-auto justify-between md:justify-end">
+        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-between md:justify-end">
           <div className="flex items-center space-x-1 bg-slate-900/80 p-1 rounded-xl border border-slate-700/80">
             <button
               onClick={() => setMode('text')}
@@ -218,6 +264,15 @@ export const InterviewRoomPage: React.FC = () => {
             <Clock className="w-4 h-4 text-indigo-400" />
             <span>{formatTimer(elapsedSeconds)}</span>
           </div>
+
+          <button
+            onClick={handleQuitInterview}
+            disabled={endingInterview || submitting}
+            className="inline-flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-200 transition-colors hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <LogOut className="h-4 w-4" />
+            <span>{endingInterview ? 'Ending...' : 'Quit Interview'}</span>
+          </button>
         </div>
       </div>
 
@@ -274,7 +329,7 @@ export const InterviewRoomPage: React.FC = () => {
               </div>
 
               {/* Voice Controller if in Voice Mode */}
-              {mode === 'voice' && (
+              {mode === 'voice' && !isMcq && (
                 <VoiceController
                   questionText={currentQuestion.question_text}
                   onTranscriptUpdate={(transcript) => setAnswerText(transcript)}
@@ -286,41 +341,80 @@ export const InterviewRoomPage: React.FC = () => {
               {/* Answer Input or Evaluation Result */}
               {!evaluation ? (
                 <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-                      Your Response {mode === 'voice' ? '(Transcribed Speech or Type Below)' : ''}
-                    </label>
-                    <textarea
-                      value={answerText}
-                      onChange={(e) => setAnswerText(e.target.value)}
-                      rows={6}
-                      placeholder="Explain your approach, design decisions, architectural trade-offs, and technical rationale clearly..."
-                      className="w-full px-4 py-3 bg-slate-900/90 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-sans leading-relaxed"
-                    />
-                  </div>
+                  {isMcq ? (
+                    <fieldset className="space-y-3">
+                      <legend className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                        Select one answer
+                      </legend>
+                      {currentQuestion.options.map((option, index) => (
+                        <label
+                          key={option}
+                          className={`flex items-start gap-3 p-4 rounded-xl border cursor-pointer transition-colors ${
+                            selectedOption === option
+                              ? 'bg-indigo-950/50 border-indigo-500'
+                              : 'bg-slate-900/80 border-slate-700 hover:border-slate-500'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="mcq-answer"
+                            value={option}
+                            checked={selectedOption === option}
+                            onChange={() => {
+                              setSelectedOption(option);
+                              void handleSubmitAnswer(option);
+                            }}
+                            disabled={submitting}
+                            className="mt-1 accent-indigo-500"
+                          />
+                          <span className="text-sm text-white">
+                            <span className="font-mono text-indigo-300 mr-2">{String.fromCharCode(65 + index)}.</span>
+                            {option}
+                          </span>
+                        </label>
+                      ))}
+                    </fieldset>
+                  ) : (
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                        Your Response {mode === 'voice' ? '(Transcribed Speech or Type Below)' : ''}
+                      </label>
+                      <textarea
+                        value={answerText}
+                        onChange={(e) => setAnswerText(e.target.value)}
+                        rows={6}
+                        placeholder="Explain your approach, design decisions, architectural trade-offs, and technical rationale clearly..."
+                        className="w-full px-4 py-3 bg-slate-900/90 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-sans leading-relaxed"
+                      />
+                    </div>
+                  )}
 
                   <div className="flex items-center justify-between pt-2">
                     <span className="text-xs text-slate-500">
-                      Take your time. Questions adapt dynamically to your answers.
+                      {isMcq
+                        ? (submitting ? 'Checking your choice...' : 'Choose an option to submit it immediately.')
+                        : 'Take your time. Questions adapt dynamically to your answers.'}
                     </span>
 
-                    <button
-                      onClick={handleSubmitAnswer}
-                      disabled={submitting || !answerText.trim()}
-                      className="inline-flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all text-sm"
-                    >
-                      {submitting ? (
-                        <div className="flex items-center space-x-2">
-                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                          <span>Gemini is evaluating...</span>
-                        </div>
-                      ) : (
-                        <>
-                          <Send className="w-4 h-4" />
-                          <span>Submit Answer</span>
-                        </>
-                      )}
-                    </button>
+                    {!isMcq && (
+                      <button
+                        onClick={() => void handleSubmitAnswer()}
+                        disabled={submitting || !answerText.trim()}
+                        className="inline-flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/30 transition-all text-sm"
+                      >
+                        {submitting ? (
+                          <div className="flex items-center space-x-2">
+                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                            <span>Gemini is evaluating...</span>
+                          </div>
+                        ) : (
+                          <>
+                            <Send className="w-4 h-4" />
+                            <span>Submit Answer</span>
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -367,6 +461,27 @@ export const InterviewRoomPage: React.FC = () => {
                       <span className="text-lg font-bold text-white">{evaluation.clarity}%</span>
                     </div>
                   </div>
+
+                  {evaluation.correct_answer && (
+                    <div className="rounded-xl border border-emerald-700/50 bg-emerald-950/30 p-4 space-y-2">
+                      <span className="block text-xs font-bold uppercase tracking-wide text-emerald-300">
+                        Correct Answer
+                      </span>
+                      <p className="text-sm font-semibold text-white">
+                        {evaluation.correct_answer}
+                      </p>
+                      {selectedOption && (
+                        <p className="text-xs text-slate-300">
+                          Your answer: {selectedOption}
+                        </p>
+                      )}
+                      {evaluation.answer_explanation && (
+                        <p className="text-xs leading-relaxed text-slate-300">
+                          {evaluation.answer_explanation}
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {/* Observations */}
                   {evaluation.communication_observation && (

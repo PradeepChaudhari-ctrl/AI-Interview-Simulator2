@@ -26,6 +26,32 @@ from backend.app.services.gemini_service import gemini_service
 
 logger = logging.getLogger(__name__)
 
+
+def _correctness_by_round(session_id: str, db: Session) -> tuple[List[float], Dict[int, List[float]]]:
+    """Collect correctness scores from submitted answers for accurate report totals."""
+    rounds = db.query(InterviewRound).filter(
+        InterviewRound.session_id == session_id
+    ).order_by(InterviewRound.round_order).all()
+    all_correctness: List[float] = []
+    by_round: Dict[int, List[float]] = {}
+    for round_obj in rounds:
+        questions = db.query(Question).filter(Question.round_id == round_obj.id).all()
+        scores: List[float] = []
+        for question in questions:
+            answer = db.query(Answer).filter(Answer.question_id == question.id).first()
+            if not answer or not answer.evaluation_json:
+                continue
+            try:
+                evaluation = json.loads(answer.evaluation_json)
+                score = float(evaluation.get("correctness", evaluation.get("score")))
+                score = max(0.0, min(100.0, score))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            scores.append(score)
+            all_correctness.append(score)
+        by_round[round_obj.round_order] = scores
+    return all_correctness, by_round
+
 async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> ReportResponse:
     session = db.query(InterviewSession).filter(
         InterviewSession.id == session_id,
@@ -39,11 +65,22 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
     existing_report = db.query(Report).filter(Report.session_id == session.id).first()
     if existing_report:
         blueprint = db.query(InterviewBlueprint).filter(InterviewBlueprint.id == session.blueprint_id).first()
+        metrics_data = json.loads(existing_report.overall_metrics_json)
+        correctness_scores, correctness_by_round = _correctness_by_round(session.id, db)
+        if correctness_scores:
+            metrics_data["readiness_score"] = round(sum(correctness_scores) / len(correctness_scores), 1)
+            metrics_data["problem_solving_score"] = metrics_data["readiness_score"]
+            for round_metric in metrics_data.get("round_metrics", []):
+                round_scores = correctness_by_round.get(round_metric.get("round_order"), [])
+                if round_scores:
+                    round_metric["score"] = round(sum(round_scores) / len(round_scores), 1)
+            existing_report.overall_metrics_json = json.dumps(metrics_data)
+            db.commit()
         return ReportResponse(
             id=existing_report.id,
             session_id=session.id,
             target_role=blueprint.target_role,
-            overall_metrics=OverallMetrics(**json.loads(existing_report.overall_metrics_json)),
+            overall_metrics=OverallMetrics(**metrics_data),
             weaknesses=json.loads(existing_report.weaknesses_json),
             strengths=json.loads(existing_report.overall_metrics_json).get("strengths", []),
             recommendations=json.loads(existing_report.recommendations_json),
@@ -69,6 +106,8 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
     comm_scores: List[float] = []
     clarity_scores: List[float] = []
     correctness_scores: List[float] = []
+    evaluated_strengths: List[str] = []
+    evaluated_weaknesses: List[str] = []
 
     for r in rounds:
         round_cfg = rounds_config[r.round_order - 1] if (r.round_order - 1) < len(rounds_config) else {}
@@ -76,6 +115,7 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
 
         questions = db.query(Question).filter(Question.round_id == r.id).all()
         round_evals = []
+        round_correctness_scores: List[float] = []
         round_strengths = []
         round_weaknesses = []
 
@@ -91,12 +131,15 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
                     comm_scores.append(float(ev["relevance"]))
                     clarity_scores.append(float(ev["clarity"]))
                     correctness_scores.append(float(ev["correctness"]))
+                    round_correctness_scores.append(float(ev["correctness"]))
 
                     topic = q.topic or r.round_type
-                    topic_scores.setdefault(topic, []).append(score)
+                    topic_scores.setdefault(topic, []).append(float(ev["correctness"]))
 
                     round_strengths.extend(ev["strengths"])
                     round_weaknesses.extend(ev["weaknesses"])
+                    evaluated_strengths.extend(ev.get("strengths", []))
+                    evaluated_weaknesses.extend(ev.get("weaknesses", []))
 
                     round_evals.append({
                         "question": q.question_text,
@@ -109,7 +152,7 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
                 except Exception:
                     pass
 
-        round_avg = round(sum([e["score"] for e in round_evals]) / len(round_evals), 1) if round_evals else 0.0
+        round_avg = round(sum(round_correctness_scores) / len(round_correctness_scores), 1) if round_correctness_scores else 0.0
         round_metrics.append(RoundMetric(
             round_order=r.round_order,
             round_type=r.round_type,
@@ -135,7 +178,7 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
         )
 
     # Calculate metrics only from saved, real Gemini evaluations.
-    readiness_score = round(sum(all_scores) / len(all_scores), 1)
+    readiness_score = round(sum(correctness_scores) / len(correctness_scores), 1)
     tech_depth_score = round(sum(tech_depth_scores) / len(tech_depth_scores), 1)
     comm_score = round(sum(comm_scores) / len(comm_scores), 1)
     prob_score = round(sum(correctness_scores) / len(correctness_scores), 1)
@@ -166,11 +209,25 @@ async def get_or_generate_report(session_id: str, user_id: str, db: Session) -> 
         raw_plan = report_ai.get("practice_plan", [])
         practice_plan = [PracticePlanItem(**p) for p in raw_plan]
     except Exception as e:
-        logger.error("Final report generation failed (%s).", type(e).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Final report generation failed. Please retry."
-        ) from e
+        logger.warning(
+            "Gemini report summary unavailable (%s); using saved answer evaluations.",
+            type(e).__name__,
+        )
+        strengths = list(dict.fromkeys(evaluated_strengths))[:5]
+        weaknesses = list(dict.fromkeys(evaluated_weaknesses))[:5]
+        recommendations = [f"Practice: {item}" for item in weaknesses]
+        if not recommendations:
+            recommendations = ["Continue practicing questions for this role and review the answer explanations."]
+        practice_plan = [
+            PracticePlanItem(
+                topic=item.topic,
+                priority="High" if item.score < 40 else "Medium",
+                reason=f"Current correctness score: {item.score:.0f}%.",
+                suggested_actions=[f"Review the concepts behind {item.topic} and retry related questions."],
+            )
+            for item in topic_metrics
+            if item.status == "needs_practice"
+        ][:5]
 
     overall_metrics = OverallMetrics(
         readiness_score=readiness_score,

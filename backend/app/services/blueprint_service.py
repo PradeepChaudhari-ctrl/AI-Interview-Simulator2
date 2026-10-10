@@ -47,8 +47,19 @@ async def generate_interview_blueprint(
         raw_blueprint = await gemini_service.generate_structured_json(
             system_prompt=BLUEPRINT_SYSTEM_PROMPT,
             user_prompt=prompt,
-            temperature=0.2
+            temperature=0.2,
+            model=gemini_service.fast_model,
         )
+        # Model output can exceed the application's supported round size.
+        # Cap it before schema validation so one oversized count doesn't fail
+        # the entire blueprint response.
+        raw_rounds = raw_blueprint.get("rounds", [])
+        if isinstance(raw_rounds, list):
+            for round_data in raw_rounds:
+                if isinstance(round_data, dict):
+                    question_count = round_data.get("question_count")
+                    if isinstance(question_count, int) and question_count > 10:
+                        round_data["question_count"] = 10
         blueprint_data = BlueprintData(**raw_blueprint)
     except Exception as e:
         logger.error("Gemini blueprint generation failed (%s).", type(e).__name__)
@@ -57,11 +68,15 @@ async def generate_interview_blueprint(
             detail=f"Interview blueprint generation failed: {e}"
         ) from e
     # Validate rounds server-side
-    if not blueprint_data.rounds or len(blueprint_data.rounds) == 0:
+    if len(blueprint_data.rounds) != 5:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Generated blueprint has no interview rounds."
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Generated blueprint must contain exactly 5 interview rounds."
         )
+
+    # Keep the interview format consistent even if the model omits or mislabels it.
+    for index, interview_round in enumerate(blueprint_data.rounds):
+        interview_round.question_format = "mcq" if index < 2 else "open_ended"
 
     # Store in database
     db_blueprint = InterviewBlueprint(

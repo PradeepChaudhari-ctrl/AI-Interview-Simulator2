@@ -2,13 +2,10 @@ import json
 import re
 from typing import Any
 
-from backend.app.core.config import get_settings
+from backend.app.services.gemini_service import gemini_service
 
 
 class MCQService:
-    def __init__(self):
-        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
-
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
         text = text.strip()
@@ -111,20 +108,6 @@ class MCQService:
         count: int = 5,
     ) -> list[dict[str, Any]]:
 
-        settings = get_settings()
-
-        api_key = getattr(settings, "GROQ_API_KEY", "")
-        model = getattr(
-            settings,
-            "GROQ_MODEL",
-            "openai/gpt-oss-20b",
-        )
-
-        if not api_key:
-            raise RuntimeError(
-                "GROQ_API_KEY is not configured"
-            )
-
         difficulty = difficulty.strip().lower()
 
         allowed_difficulties = {
@@ -182,69 +165,16 @@ Return ONLY valid JSON in exactly this structure:
 }}
 """
 
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You generate reliable interview MCQs "
-                        "and MUST return valid JSON only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            "temperature": 0.5,
-            "max_completion_tokens": 2500,
-        }
-
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        import httpx
-
-        async with httpx.AsyncClient(
-            timeout=60.0
-        ) as client:
-
-            response = await client.post(
-                self.base_url,
-                headers=headers,
-                json=payload,
-            )
-
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Groq API error {response.status_code}: "
-                f"{response.text}"
-            )
-
-        data = response.json()
-
-        choices = data.get("choices", [])
-
-        if not choices:
-            raise RuntimeError(
-                "Groq returned no choices"
-            )
-
-        content = (
-            choices[0]
-            .get("message", {})
-            .get("content", "")
+        parsed = await gemini_service.generate_structured_json(
+            system_prompt=(
+                "You generate reliable interview multiple-choice questions. "
+                "Return a JSON object with a questions array. Each question must have "
+                "exactly four options and one correct_answer matching an option."
+            ),
+            user_prompt=prompt,
+            temperature=0.5,
+            model=gemini_service.fast_model,
         )
-
-        if not content:
-            raise RuntimeError(
-                "Groq returned empty response"
-            )
-
-        parsed = self._extract_json(content)
 
         questions = self._clean_questions(parsed)
 

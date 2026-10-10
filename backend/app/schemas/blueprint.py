@@ -5,6 +5,7 @@ from typing import List, Optional
 class BlueprintRound(BaseModel):
     name: str
     round_type: str = Field(..., description="aptitude, core, technical, behavioral, coding, case_study")
+    question_format: str = Field(default="open_ended", description="mcq or open_ended")
     objective: str
     topics: List[str] = Field(default_factory=list)
     question_count: int = Field(default=3, ge=1, le=10)

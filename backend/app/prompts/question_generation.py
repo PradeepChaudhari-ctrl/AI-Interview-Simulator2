@@ -21,6 +21,23 @@ Return ONLY valid JSON matching this schema:
 No markdown formatting, no backticks.
 """
 
+MCQ_QUESTION_SYSTEM_PROMPT = """You are an expert interview question writer.
+Generate one unambiguous multiple-choice question for the specified interview round.
+Return ONLY valid JSON matching this schema:
+{
+  "question": "Question text",
+  "type": "mcq",
+  "topic": "The specific topic tested",
+  "difficulty": "easy | medium | hard",
+  "expected_concepts": ["concept or keyword 1"],
+  "options": ["Option A", "Option B", "Option C", "Option D"],
+  "correct_answer": "The exact text of one option",
+  "explanation": "A concise explanation of the correct answer"
+}
+There must be exactly four distinct options and exactly one correct answer.
+No markdown formatting, no backticks.
+"""
+
 def build_question_prompt(
     round_name: str,
     round_type: str,
@@ -31,7 +48,8 @@ def build_question_prompt(
     candidate_profile: Optional[Dict[str, Any]] = None,
     previous_questions: Optional[List[str]] = None,
     question_index: int = 1,
-    total_questions: int = 3
+    total_questions: int = 3,
+    question_format: str = "open_ended"
 ) -> str:
     profile_text = ""
     if candidate_profile:
@@ -59,4 +77,5 @@ Candidate Background:
 
 {prev_q_text}
 
-Generate question #{question_index} for this candidate. Ground it in the candidate's actual experience and the round topic. Return ONLY the strict JSON object."""
+Question Format: {question_format}
+Generate question #{question_index} for this candidate. Ground it in the candidate's actual experience and the round topic. For MCQ format, provide exactly four distinct options and the exact correct option text. Return ONLY the strict JSON object."""

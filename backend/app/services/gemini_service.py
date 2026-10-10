@@ -1,711 +1,154 @@
 import asyncio
 import json
 import logging
-import re
-from typing import Dict, Any
+from typing import Any, Dict, List
 
 import httpx
 
 from backend.app.core.config import get_settings
 
-
 logger = logging.getLogger(__name__)
-
 settings = get_settings()
 
 
-# ============================================================
-# GROQ REQUEST PACER
-# ============================================================
-
-class GroqRequestPacer:
-    """
-    Controls the frequency of requests sent to Groq.
-    This helps avoid hitting RPM limits.
-    """
-
-    def __init__(self, requests_per_minute: int = 10):
-        self.requests_per_minute = max(
-            1,
-            requests_per_minute
-        )
-
-        self.interval_seconds = (
-            60.0 / self.requests_per_minute
-        )
-
-        self.next_request_at = 0.0
-        self.lock = asyncio.Lock()
-
-    async def wait_turn(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        async with self.lock:
-            now = loop.time()
-
-            wait_seconds = max(
-                0.0,
-                self.next_request_at - now
-            )
-
-            if wait_seconds > 0:
-                logger.info(
-                    "Waiting %.1f seconds before Groq request.",
-                    wait_seconds
-                )
-
-                await asyncio.sleep(
-                    wait_seconds
-                )
-
-            self.next_request_at = (
-                loop.time()
-                + self.interval_seconds
-            )
-
-
-# ============================================================
-# CLEAN JSON RESPONSE
-# ============================================================
-
 def clean_json_response(raw_text: str) -> str:
-    """
-    Cleans markdown/code fences and extracts JSON object.
-    """
+    """Remove optional markdown fences and isolate the JSON object."""
+    text = (raw_text or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text[:-3]
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start:end + 1].strip()
+    return text
 
-    if not raw_text:
-        raise ValueError(
-            "Groq returned an empty response."
-        )
-
-    text = raw_text.strip()
-
-    # Remove ```json
-    if text.startswith("```json"):
-        text = text[7:]
-
-    # Remove ```
-    elif text.startswith("```"):
-        text = text[3:]
-
-    # Remove ending ```
-    if text.endswith("```"):
-        text = text[:-3]
-
-    text = text.strip()
-
-    # Find first JSON object
-    start = text.find("{")
-
-    # Find last JSON object
-    end = text.rfind("}")
-
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
-
-    return text.strip()
-
-
-# ============================================================
-# EXTRACT RETRY TIME FROM GROQ ERROR
-# ============================================================
-
-def extract_retry_seconds(
-    error_message: str,
-) -> float:
-    """
-    Extract retry time from messages such as:
-
-    Please try again in 2.0775s.
-    """
-
-    if not error_message:
-        return 5.0
-
-    patterns = [
-        r"try again in\s+([0-9]+(?:\.[0-9]+)?)s",
-        r"retry.*?([0-9]+(?:\.[0-9]+)?)s",
-    ]
-
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            error_message,
-            re.IGNORECASE
-        )
-
-        if match:
-            try:
-                seconds = float(
-                    match.group(1)
-                )
-
-                # Add a small safety buffer.
-                return max(
-                    3.0,
-                    seconds + 1.0
-                )
-
-            except ValueError:
-                pass
-
-    # Safe fallback
-    return 5.0
-
-
-# ============================================================
-# GROQ AI SERVICE
-# ============================================================
 
 class GeminiService:
-    """
-    Compatibility class.
+    """Gemini REST client with round-robin keys and per-request failover."""
 
-    Existing application code uses GeminiService and
-    gemini_service, so we keep those names.
+    PER_KEY_TIMEOUT_SECONDS = 15.0
+    TOTAL_REQUEST_TIMEOUT_SECONDS = 35.0
 
-    Internally this service uses Groq.
-    """
+    def __init__(self) -> None:
+        self.model = settings.GEMINI_MODEL
+        self.fast_model = settings.GEMINI_FAST_MODEL
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        self._keys = self._load_keys()
+        self._next_key = 0
+        self._key_lock = asyncio.Lock()
 
-    def __init__(self):
+    @staticmethod
+    def _load_keys() -> List[str]:
+        # Supports GEMINI_API_KEYS as a comma-separated list, plus the
+        # explicit numbered variables and the original GEMINI_API_KEY.
+        # Prefer numbered variables when both formats are populated so the
+        # four explicit slots are the ones used by default.
+        candidates = [
+            getattr(settings, "GEMINI_API_KEY", ""),
+            getattr(settings, "GEMINI_API_KEY_2", ""),
+            getattr(settings, "GEMINI_API_KEY_3", ""),
+            getattr(settings, "GEMINI_API_KEY_4", ""),
+            getattr(settings, "GEMINI_API_KEYS", ""),
+        ]
+        keys: List[str] = []
+        for candidate in candidates:
+            for key in str(candidate or "").split(","):
+                key = key.strip()
+                if key and key not in keys:
+                    keys.append(key)
+        return keys
 
-        # ----------------------------------------------------
-        # API KEY
-        # ----------------------------------------------------
-
-        self.api_key = getattr(
-            settings,
-            "GROQ_API_KEY",
-            "",
-        )
-
-        # ----------------------------------------------------
-        # MODEL
-        # ----------------------------------------------------
-
-        self.model = getattr(
-            settings,
-            "GROQ_MODEL",
-            "openai/gpt-oss-20b",
-        )
-
-        # ----------------------------------------------------
-        # GROQ ENDPOINT
-        # ----------------------------------------------------
-
-        self.base_url = (
-            "https://api.groq.com/openai/v1/chat/completions"
-        )
-
-        # ----------------------------------------------------
-        # REQUEST PACER
-        # ----------------------------------------------------
-
-        self.request_pacer = GroqRequestPacer(
-            getattr(
-                settings,
-                "GROQ_RPM_LIMIT",
-                10,
+    async def _key_order(self) -> List[str]:
+        if not self._keys:
+            raise RuntimeError(
+                "No Gemini API keys are configured. Add GEMINI_API_KEY (and optionally "
+                "GEMINI_API_KEY_2 through GEMINI_API_KEY_4) to backend/.env."
             )
-        )
-
-        # ----------------------------------------------------
-        # Keep output smaller to reduce TPM usage.
-        # ----------------------------------------------------
-
-        self.max_completion_tokens = 2500
-
-    # ========================================================
-    # PUBLIC METHOD
-    # ========================================================
+        async with self._key_lock:
+            start = self._next_key
+            self._next_key = (self._next_key + 1) % len(self._keys)
+        return self._keys[start:] + self._keys[:start]
 
     async def generate_structured_json(
         self,
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> Dict[str, Any]:
-
-        return await self._generate_with_model(
-            model=self.model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=temperature,
+        prompt = (
+            f"{system_prompt}\n\n"
+            "Return only one valid JSON object. Do not include markdown fences or text outside JSON."
         )
-
-    # ========================================================
-    # MAIN GROQ REQUEST
-    # ========================================================
-
-    async def _generate_with_model(
-        self,
-        model: str,
-        system_prompt: str,
-        user_prompt: str,
-        temperature: float,
-    ) -> Dict[str, Any]:
-
-        # ----------------------------------------------------
-        # API KEY CHECK
-        # ----------------------------------------------------
-
-        if not self.api_key:
-            raise RuntimeError(
-                "GROQ_API_KEY is not set. "
-                "Please configure GROQ_API_KEY in backend/.env."
-            )
-
-        # ----------------------------------------------------
-        # FORCE JSON RESPONSE
-        # ----------------------------------------------------
-
-        json_system_prompt = f"""
-{system_prompt}
-
-IMPORTANT OUTPUT FORMAT:
-
-Return ONLY a valid JSON object.
-
-Do NOT return:
-- Markdown
-- ```json
-- ```
-- explanations
-- comments
-- text before JSON
-- text after JSON
-
-The complete response must be a single valid JSON object.
-""".strip()
-
-        # ----------------------------------------------------
-        # GROQ PAYLOAD
-        # ----------------------------------------------------
-
         payload = {
-            "model": model,
-
-            "messages": [
-                {
-                    "role": "system",
-                    "content": json_system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
-
-            # Keep temperature low for structured output
-            "temperature": temperature,
-
-            # JSON Object Mode
-            "response_format": {
-                "type": "json_object"
+            "systemInstruction": {"parts": [{"text": prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "responseMimeType": "application/json",
             },
-
-            # GPT-OSS:
-            # Disable visible reasoning so the response
-            # contains only the requested JSON.
-            "include_reasoning": False,
-
-            # Reduce token consumption while giving
-            # enough room for structured interview JSON.
-            "max_completion_tokens": (
-                self.max_completion_tokens
-            ),
         }
-
-        # ====================================================
-        # HTTP CLIENT
-        # ====================================================
-
-        async with httpx.AsyncClient(
-            timeout=60.0
-        ) as client:
-
-            # Maximum two attempts.
-            #
-            # We don't want repeated 429 requests to
-            # consume more TPM.
-
-            for attempt in range(2):
-
+        request_model = model or self.model
+        key_order = await self._key_order()
+        errors: List[str] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.TOTAL_REQUEST_TIMEOUT_SECONDS
+        async with httpx.AsyncClient(timeout=self.PER_KEY_TIMEOUT_SECONDS) as client:
+            for index, key in enumerate(key_order):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    errors.append("overall request deadline reached")
+                    break
+                url = f"{self.base_url}/{request_model}:generateContent"
                 try:
-
-                    # ----------------------------------------
-                    # RPM protection
-                    # ----------------------------------------
-
-                    await self.request_pacer.wait_turn()
-
-                    # ----------------------------------------
-                    # SEND REQUEST
-                    # ----------------------------------------
-
                     response = await client.post(
-                        self.base_url,
+                        url,
                         json=payload,
-                        headers={
-                            "Authorization": (
-                                f"Bearer {self.api_key}"
-                            ),
-                            "Content-Type": (
-                                "application/json"
-                            ),
-                        },
+                        headers={"x-goog-api-key": key},
+                        timeout=min(self.PER_KEY_TIMEOUT_SECONDS, remaining),
                     )
-
-                    # ----------------------------------------
-                    # SUCCESS
-                    # ----------------------------------------
-
                     response.raise_for_status()
-
-                    # ----------------------------------------
-                    # PARSE RESPONSE
-                    # ----------------------------------------
-
                     data = response.json()
-
-                    choices = data.get(
-                        "choices",
-                        []
+                    parts = (
+                        data.get("candidates", [{}])[0]
+                        .get("content", {})
+                        .get("parts", [])
                     )
-
-                    if not choices:
-                        raise RuntimeError(
-                            "Groq returned no choices."
-                        )
-
-                    message = choices[0].get(
-                        "message",
-                        {}
+                    raw_text = "".join(
+                        part.get("text", "") for part in parts
+                        if isinstance(part, dict)
                     )
-
-                    raw_text = message.get(
-                        "content",
-                        ""
-                    )
-
-                    if not raw_text:
-                        raise RuntimeError(
-                            "Groq returned an empty response."
-                        )
-
-                    # ----------------------------------------
-                    # CLEAN JSON
-                    # ----------------------------------------
-
-                    cleaned = clean_json_response(
-                        raw_text
-                    )
-
-                    # ----------------------------------------
-                    # PARSE JSON
-                    # ----------------------------------------
-
-                    try:
-
-                        parsed = json.loads(
-                            cleaned
-                        )
-
-                    except json.JSONDecodeError as json_error:
-
-                        logger.error(
-                            "Groq returned invalid JSON."
-                        )
-
-                        logger.error(
-                            "Raw response: %s",
-                            raw_text[:1000]
-                        )
-
-                        # Try one more extraction
-                        start = cleaned.find("{")
-                        end = cleaned.rfind("}")
-
-                        if (
-                            start != -1
-                            and end != -1
-                            and end > start
-                        ):
-
-                            possible_json = (
-                                cleaned[
-                                    start:end + 1
-                                ]
-                            )
-
-                            try:
-
-                                parsed = json.loads(
-                                    possible_json
-                                )
-
-                            except json.JSONDecodeError:
-
-                                raise RuntimeError(
-                                    "Groq returned invalid JSON."
-                                ) from json_error
-
-                        else:
-
-                            raise RuntimeError(
-                                "Groq returned invalid JSON."
-                            ) from json_error
-
-                    # ----------------------------------------
-                    # CHECK OBJECT
-                    # ----------------------------------------
-
-                    if not isinstance(
-                        parsed,
-                        dict
-                    ):
-                        raise RuntimeError(
-                            "Groq response is not a JSON object."
-                        )
-
-                    # ----------------------------------------
-                    # SUCCESS
-                    # ----------------------------------------
-
+                    parsed = json.loads(clean_json_response(raw_text))
+                    if not isinstance(parsed, dict):
+                        raise ValueError("Gemini returned JSON that was not an object.")
                     logger.info(
-                        "Groq request successful using model %s.",
-                        model
+                        "Gemini request succeeded using key slot %d and model %s.",
+                        index + 1,
+                        request_model,
                     )
-
                     return parsed
-
-                # ====================================================
-                # HTTP ERROR
-                # ====================================================
-
-                except httpx.HTTPStatusError as error:
-
-                    status_code = (
-                        error.response.status_code
+                except (httpx.HTTPError, json.JSONDecodeError, ValueError, KeyError, IndexError) as error:
+                    # Never log the key or provider URL with its credential.
+                    status = (
+                        f"HTTP {error.response.status_code}"
+                        if isinstance(error, httpx.HTTPStatusError)
+                        else type(error).__name__
                     )
-
-                    # ----------------------------------------
-                    # Read provider error
-                    # ----------------------------------------
-
-                    provider_message = ""
-
-                    try:
-
-                        error_data = (
-                            error.response.json()
-                        )
-
-                        provider_error = (
-                            error_data.get(
-                                "error",
-                                {}
-                            )
-                        )
-
-                        provider_message = (
-                            provider_error.get(
-                                "message",
-                                ""
-                            )
-                        )
-
-                        # Preserve useful Groq details such as
-                        # failed_generation when available.
-                        failed_generation = (
-                            provider_error.get(
-                                "failed_generation",
-                                ""
-                            )
-                        )
-
-                        if failed_generation:
-                            logger.error(
-                                "Groq failed_generation: %s",
-                                str(
-                                    failed_generation
-                                )[:1000]
-                            )
-
-                    except Exception:
-
-                        provider_message = (
-                            error.response.text
-                        )
-
-                    # =================================================
-                    # RATE LIMIT 429
-                    # =================================================
-
-                    if status_code == 429:
-
-                        retry_seconds = (
-                            extract_retry_seconds(
-                                provider_message
-                            )
-                        )
-
-                        # Try Retry-After header first
-                        retry_after = (
-                            error.response.headers.get(
-                                "retry-after"
-                            )
-                        )
-
-                        if retry_after:
-
-                            try:
-
-                                retry_seconds = max(
-                                    retry_seconds,
-                                    float(
-                                        retry_after
-                                    )
-                                )
-
-                            except ValueError:
-                                pass
-
-                        # ---------------------------------------------
-                        # If first attempt, wait and retry once
-                        # ---------------------------------------------
-
-                        if attempt == 0:
-
-                            logger.warning(
-                                "Groq rate limit reached. "
-                                "Waiting %.1f seconds before retry.",
-                                retry_seconds
-                            )
-
-                            await asyncio.sleep(
-                                retry_seconds
-                            )
-
-                            continue
-
-                        # ---------------------------------------------
-                        # Don't endlessly retry
-                        # ---------------------------------------------
-
-                        logger.error(
-                            "Groq TPM/RPM rate limit still active "
-                            "after retry: %s",
-                            provider_message[:500]
-                        )
-
-                        raise RuntimeError(
-                            "Groq rate limit reached. "
-                            "Please wait a few seconds and try again."
-                        ) from error
-
-                    # =================================================
-                    # OTHER RETRYABLE ERRORS
-                    # =================================================
-
-                    retryable_statuses = {
-                        500,
-                        502,
-                        503,
-                        504,
-                    }
-
-                    if (
-                        status_code
-                        in retryable_statuses
-                        and attempt == 0
-                    ):
-
-                        logger.warning(
-                            "Groq returned HTTP %s. "
-                            "Retrying in 3 seconds.",
-                            status_code
-                        )
-
-                        await asyncio.sleep(3)
-
-                        continue
-
-                    # =================================================
-                    # FINAL HTTP ERROR
-                    # =================================================
-
-                    logger.error(
-                        "Groq rejected request "
-                        "(HTTP %s): %s",
-                        status_code,
-                        provider_message[:500]
+                    errors.append(f"key slot {index + 1}: {status}")
+                    logger.warning(
+                        "Gemini request failed with key slot %d (%s); trying the next configured key.",
+                        index + 1,
+                        status,
                     )
+                    if index + 1 < len(key_order):
+                        await asyncio.sleep(0.25)
 
-                    detail = (
-                        f"Groq rejected the request "
-                        f"(HTTP {status_code})."
-                    )
-
-                    if provider_message:
-
-                        detail += (
-                            f" {provider_message[:500]}"
-                        )
-
-                    raise RuntimeError(
-                        detail
-                    ) from error
-
-                # ====================================================
-                # JSON ERROR
-                # ====================================================
-
-                except json.JSONDecodeError as error:
-
-                    logger.error(
-                        "Failed to parse Groq JSON: %s",
-                        error
-                    )
-
-                    raise RuntimeError(
-                        "Groq returned invalid JSON."
-                    ) from error
-
-                # ====================================================
-                # RUNTIME ERROR
-                # ====================================================
-
-                except RuntimeError:
-                    raise
-
-                # ====================================================
-                # OTHER ERROR
-                # ====================================================
-
-                except Exception as error:
-
-                    logger.exception(
-                        "Unexpected Groq API error."
-                    )
-
-                    raise RuntimeError(
-                        "Groq API request failed. "
-                        "Check server configuration "
-                        "and provider availability."
-                    ) from error
-
-        # ----------------------------------------------------
-        # Should never reach here
-        # ----------------------------------------------------
-
+        logger.error("All configured Gemini keys failed: %s", ", ".join(errors))
         raise RuntimeError(
-            "Groq request failed."
+            "Gemini could not generate a response with the configured API keys "
+            f"({', '.join(errors)}). Check key validity, model access, and quota."
         )
 
-
-# ============================================================
-# GLOBAL INSTANCE
-# ============================================================
 
 gemini_service = GeminiService()

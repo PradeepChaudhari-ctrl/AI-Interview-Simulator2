@@ -71,7 +71,11 @@ Education: B.S. in Computer Science
     ans_res = client.post(
         f"/api/questions/{q1['id']}/answer",
         json={
-            "text_answer": "In our distributed queue, we used Redis Streams with consumer groups to achieve at-least-once delivery, and PostgreSQL transactions with optimistic concurrency control to prevent double processing.",
+            "text_answer": (
+                q1["options"][0]
+                if q1["question_type"] == "mcq"
+                else "In our distributed queue, we used Redis Streams with consumer groups to achieve at-least-once delivery, and PostgreSQL transactions with optimistic concurrency control to prevent double processing."
+            ),
             "duration_seconds": 45.0,
             "mode": "text"
         },

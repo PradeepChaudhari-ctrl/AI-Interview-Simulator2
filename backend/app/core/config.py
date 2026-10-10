@@ -18,7 +18,12 @@ class Settings(BaseSettings):
 
     # Gemini configuration
     GEMINI_API_KEY: str = ""
+    GEMINI_API_KEY_2: str = ""
+    GEMINI_API_KEY_3: str = ""
+    GEMINI_API_KEY_4: str = ""
+    GEMINI_API_KEYS: str = ""
     GEMINI_MODEL: str = "gemini-3.8-flash"
+    GEMINI_FAST_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_FALLBACK_MODEL: str = "gemini-3.7-flash"
     GEMINI_RPM_LIMIT: int = Field(default=5, ge=1)
 

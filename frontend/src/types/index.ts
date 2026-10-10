@@ -60,6 +60,7 @@ export interface Resume {
 export interface BlueprintRound {
   name: string;
   round_type: 'aptitude' | 'core' | 'technical' | 'behavioral' | 'coding' | 'case_study' | string;
+  question_format?: 'mcq' | 'open_ended' | string;
   objective: string;
   topics: string[];
   question_count: number;
@@ -92,6 +93,7 @@ export interface Question {
   difficulty: string;
   topic: string;
   expected_concepts: string[];
+  options: string[];
   question_number: number;
   total_questions_in_round: number;
 }
@@ -107,6 +109,8 @@ export interface AnswerEvaluation {
   confidence_observation?: string;
   strengths: string[];
   weaknesses: string[];
+  correct_answer?: string | null;
+  answer_explanation?: string | null;
   improvement_tip: string;
   detected_topics: string[];
   weakness_tags: string[];

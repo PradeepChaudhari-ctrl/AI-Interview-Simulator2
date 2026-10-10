@@ -50,19 +50,19 @@ export const InterviewSetupPage: React.FC = () => {
       id: 'software_developer',
       name: 'Software Developer',
       icon: Code2,
-      desc: '4 Rounds: Aptitude, DSA/Core CS, System Design/Projects, HR Behavioral.',
+      desc: '5 Rounds: the first two are MCQ-based, followed by technical, design/project, and behavioral rounds.',
     },
     {
       id: 'data_analyst',
       name: 'Data Analyst & Analytics',
       icon: BarChart,
-      desc: '4 Rounds: Statistics Aptitude, SQL & Data Modeling, Python/BI Projects, Stakeholders.',
+      desc: '5 Rounds: the first two are MCQ-based, followed by analytics, project, and stakeholder rounds.',
     },
     {
       id: 'campus_placement',
       name: 'Campus Placement / Graduate',
       icon: GraduationCap,
-      desc: '4 Rounds: Quantitative Aptitude, Core CS Subjects, Technical Coding, HR.',
+      desc: '5 Rounds: the first two are MCQ-based, followed by technical, project, and HR rounds.',
     },
     {
       id: 'custom',

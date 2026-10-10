@@ -24,6 +24,7 @@ from backend.app.schemas.interview import (
 )
 from backend.app.prompts.question_generation import (
     QUESTION_SYSTEM_PROMPT,
+    MCQ_QUESTION_SYSTEM_PROMPT,
     build_question_prompt,
 )
 from backend.app.prompts.follow_up import (
@@ -206,7 +207,8 @@ async def get_or_generate_current_question(
 
     new_q_data = None
 
-    if last_answer and last_answer.evaluation_json:
+    is_mcq_round = active_round.round_order <= 2
+    if last_answer and last_answer.evaluation_json and not is_mcq_round:
         try:
             last_eval = json.loads(last_answer.evaluation_json)
             last_score = float(last_eval["score"])
@@ -234,7 +236,8 @@ async def get_or_generate_current_question(
             new_q_data = await gemini_service.generate_structured_json(
                 system_prompt=ADAPTIVE_QUESTION_SYSTEM_PROMPT,
                 user_prompt=follow_up_prompt,
-                temperature=0.3
+                temperature=0.3,
+                model=gemini_service.fast_model,
             )
         except Exception as e:
             logger.warning(f"Adaptive question generation failed, using standard generator: {e}")
@@ -250,13 +253,15 @@ async def get_or_generate_current_question(
             candidate_profile=candidate_profile,
             previous_questions=previous_question_texts,
             question_index=current_q_num,
-            total_questions=target_question_count
+            total_questions=target_question_count,
+            question_format="mcq" if is_mcq_round else "open_ended"
         )
         try:
             new_q_data = await gemini_service.generate_structured_json(
-                system_prompt=QUESTION_SYSTEM_PROMPT,
+                system_prompt=MCQ_QUESTION_SYSTEM_PROMPT if is_mcq_round else QUESTION_SYSTEM_PROMPT,
                 user_prompt=standard_prompt,
-                temperature=0.3
+                temperature=0.3,
+                model=gemini_service.fast_model,
             )
         except Exception as e:
             logger.error(f"Gemini question generation failed: {e}")
@@ -265,16 +270,49 @@ async def get_or_generate_current_question(
                 detail="Gemini could not generate a question. Please check server configuration and retry."
             )
 
+    options = []
+    correct_answer = ""
+    explanation = ""
+    if is_mcq_round:
+        raw_options = new_q_data.get("options")
+        raw_correct_answer = new_q_data.get("correct_answer")
+        raw_explanation = new_q_data.get("explanation", "")
+        raw_question = new_q_data.get("question")
+        if (
+            not isinstance(raw_question, str)
+            or not raw_question.strip()
+            or not isinstance(raw_options, list)
+            or len(raw_options) != 4
+            or any(not isinstance(option, str) or not option.strip() for option in raw_options)
+            or not isinstance(raw_correct_answer, str)
+            or not isinstance(raw_explanation, str)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Generated MCQ did not contain exactly four valid options."
+            )
+        options = [option.strip() for option in raw_options]
+        correct_answer = raw_correct_answer.strip()
+        if len(set(options)) != 4 or correct_answer not in options:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Generated MCQ did not contain one valid correct answer."
+            )
+        explanation = raw_explanation.strip()
+
     # Save question to DB
     new_question = Question(
         round_id=active_round.id,
         question_text=new_q_data.get("question", "Describe your experience and approach to solving this technical problem."),
-        question_type=new_q_data.get("type", "conceptual"),
+        question_type="mcq" if is_mcq_round else new_q_data.get("type", "conceptual"),
         difficulty=new_q_data.get("difficulty", base_difficulty),
         topic=new_q_data.get("topic", topics[0] if topics else active_round.round_type),
         metadata_json=json.dumps({
             "expected_concepts": new_q_data.get("expected_concepts", []),
-            "round_name": round_name
+            "round_name": round_name,
+            "options": options,
+            "correct_answer": correct_answer,
+            "explanation": explanation
         })
     )
     db.add(new_question)
@@ -316,29 +354,57 @@ async def submit_answer_and_evaluate(
     meta = json.loads(question.metadata_json or "{}")
     expected_concepts = meta.get("expected_concepts", [])
 
-    # Evaluate via Gemini
-    prompt = build_answer_evaluation_prompt(
-        question_text=question.question_text,
-        question_topic=question.topic,
-        expected_concepts=expected_concepts,
-        candidate_answer=request.text_answer,
-        target_role=blueprint.target_role,
-        mode=request.mode or session.mode
-    )
-
-    try:
-        eval_raw = await gemini_service.generate_structured_json(
-            system_prompt=EVALUATION_SYSTEM_PROMPT,
-            user_prompt=prompt,
-            temperature=0.1
+    if question.question_type == "mcq":
+        options = meta.get("options", [])
+        correct_answer = meta.get("correct_answer")
+        if request.text_answer not in options or correct_answer not in options:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please submit one of the available answer options."
+            )
+        is_correct = request.text_answer == correct_answer
+        explanation = meta.get("explanation", "")
+        evaluation = AnswerEvaluation(
+            score=100 if is_correct else 0,
+            correctness=100 if is_correct else 0,
+            relevance=100 if is_correct else 0,
+            technical_depth=100 if is_correct else 0,
+            clarity=100 if is_correct else 0,
+            completeness=100 if is_correct else 0,
+            communication_observation="Correct option selected." if is_correct else "Incorrect option selected.",
+            strengths=["Correct answer selected."] if is_correct else [],
+            weaknesses=[] if is_correct else ["Review the correct answer and explanation."],
+            correct_answer=correct_answer,
+            answer_explanation=explanation,
+            improvement_tip="",
+            detected_topics=[question.topic],
+            weakness_tags=[] if is_correct else [question.topic],
+            follow_up_needed=False
         )
-        evaluation = AnswerEvaluation(**eval_raw)
-    except Exception as e:
-        logger.error("Answer evaluation failed (%s).", type(e).__name__)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Answer evaluation failed. Your answer was not saved; please retry."
-        ) from e
+    else:
+        # Evaluate open-ended answers via Gemini.
+        prompt = build_answer_evaluation_prompt(
+            question_text=question.question_text,
+            question_topic=question.topic,
+            expected_concepts=expected_concepts,
+            candidate_answer=request.text_answer,
+            target_role=blueprint.target_role,
+            mode=request.mode or session.mode
+        )
+
+        try:
+            eval_raw = await gemini_service.generate_structured_json(
+                system_prompt=EVALUATION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                temperature=0.1
+            )
+            evaluation = AnswerEvaluation(**eval_raw)
+        except Exception as e:
+            logger.error("Answer evaluation failed (%s).", type(e).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Answer evaluation failed. Your answer was not saved; please retry."
+            ) from e
 
     # Save answer
     answer = Answer(

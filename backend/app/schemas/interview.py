@@ -14,6 +14,7 @@ class QuestionResponse(BaseModel):
     difficulty: str
     topic: str
     expected_concepts: List[str] = Field(default_factory=list)
+    options: List[str] = Field(default_factory=list)
     question_number: int = 1
     total_questions_in_round: int = 3
 
@@ -34,6 +35,8 @@ class AnswerEvaluation(BaseModel):
     confidence_observation: Optional[str] = ""
     strengths: List[str] = Field(default_factory=list)
     weaknesses: List[str] = Field(default_factory=list)
+    correct_answer: Optional[str] = None
+    answer_explanation: Optional[str] = None
     improvement_tip: str = ""
     detected_topics: List[str] = Field(default_factory=list)
     weakness_tags: List[str] = Field(default_factory=list)

@@ -112,6 +112,7 @@ async def get_session_details(
                 difficulty=q_obj.difficulty,
                 topic=q_obj.topic,
                 expected_concepts=meta.get("expected_concepts", []),
+                options=meta.get("options", []),
                 question_number=q_num,
                 total_questions_in_round=total_in_round
             )
@@ -148,6 +149,7 @@ async def next_question(
         difficulty=q_obj.difficulty,
         topic=q_obj.topic,
         expected_concepts=meta.get("expected_concepts", []),
+        options=meta.get("options", []),
         question_number=q_num,
         total_questions_in_round=total_in_round
     )

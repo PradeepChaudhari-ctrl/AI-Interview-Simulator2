@@ -5,7 +5,8 @@ BLUEPRINT_SYSTEM_PROMPT = """You are an elite interview architect and hiring com
 Your task is to design a personalized multi-round interview blueprint customized to a candidate's target role, background, and optional Job Description.
 
 Do NOT simply output generic rounds. Create realistic, tailored rounds that thoroughly prepare the candidate.
-Each blueprint must contain 3 to 5 realistic rounds (e.g., Aptitude/Foundational, Core Discipline/CS, Technical & Projects, Behavioral/HR, or System Design/Case Study depending on role).
+Each blueprint must contain exactly 5 realistic rounds (e.g., Aptitude/Foundational, Core Discipline/CS, Technical & Projects, Behavioral/HR, or System Design/Case Study depending on role).
+The first two rounds must be multiple-choice question rounds and use "question_format": "mcq". The remaining three rounds must use "question_format": "open_ended".
 
 Return ONLY valid JSON matching this schema:
 {
@@ -15,6 +16,7 @@ Return ONLY valid JSON matching this schema:
     {
       "name": "Round Title (e.g. Core Computer Science & Problem Solving)",
       "round_type": "aptitude | core | technical | behavioral | coding | case_study",
+      "question_format": "mcq | open_ended",
       "objective": "Clear description of the round's objective",
       "topics": ["topic 1", "topic 2", "topic 3"],
       "question_count": 3,
@@ -27,6 +29,7 @@ Return ONLY valid JSON matching this schema:
 }
 
 No markdown formatting, no backticks, no extra text.
+Each round's question_count must be between 1 and 10 inclusive.
 """
 
 def build_blueprint_prompt(
@@ -56,4 +59,4 @@ Experience Level: {experience_level or 'Entry / Mid-level'}
 {profile_summary}
 {jd_summary}
 
-Design the optimal multi-round interview blueprint. Return ONLY the strict JSON object."""
+Design exactly 5 interview rounds in the required order and format. Set each question_count between 1 and 10 inclusive. Return ONLY the strict JSON object."""

@@ -187,6 +187,9 @@ export const BlueprintPreviewPage: React.FC = () => {
                     <span className="text-xs font-mono text-slate-400 uppercase tracking-wider">
                       Type: {round.round_type}
                     </span>
+                    <span className="text-xs font-mono text-indigo-300 uppercase tracking-wider">
+                      {round.question_format === 'mcq' ? 'Multiple choice' : 'Open-ended'}
+                    </span>
                   </div>
                 </div>
 

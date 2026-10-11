@@ -1,3 +1,5 @@
+import { request } from '../services/apiClient';
+
 import React, {
   useCallback,
   useEffect,
@@ -175,28 +177,16 @@ export const LiveContextPage: React.FC = () => {
       setResult(null);
 
       try {
-        const response = await fetch(
+        const data = await request<ContextResult>(
           '/api/context/research',
           {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
             body: JSON.stringify({
               company: companyToResearch,
               role: roleToResearch,
             }),
           }
         );
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(
-            data?.detail ||
-              'Failed to fetch company context.'
-          );
-        }
 
         setResult(data);
       } catch (err) {

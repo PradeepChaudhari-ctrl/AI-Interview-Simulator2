@@ -22,7 +22,7 @@ export const PracticePage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [answering, setAnswering] = useState(false);
-  const [currentAnswerText, setCurrentAnswerText] = useState('');
+  const [currentAnswerText, setCurrentAnswerText] = useState<Record<string, string>>({});
   const [revealedHints, setRevealedHints] = useState<Record<string, boolean>>({});
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -63,7 +63,7 @@ export const PracticePage: React.FC = () => {
       setActiveSession(newSession);
       setHistory([newSession, ...history]);
       setCustomTopic('');
-      setCurrentAnswerText('');
+      setCurrentAnswerText({});
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to generate practice drill.');
     } finally {
@@ -72,7 +72,8 @@ export const PracticePage: React.FC = () => {
   };
 
   const handleSubmitAnswer = async (questionId: string) => {
-    if (!activeSession || !currentAnswerText.trim() || answering) return;
+    const answerText = currentAnswerText[questionId] || '';
+    if (!activeSession || !answerText.trim() || answering) return;
     setAnswering(true);
     setErrorMessage(null);
 
@@ -80,11 +81,11 @@ export const PracticePage: React.FC = () => {
       const updated = await practiceService.answerQuestion(
         activeSession.id,
         questionId,
-        currentAnswerText.trim()
+        answerText.trim()
       );
       setActiveSession(updated);
       setHistory(history.map((h) => (h.id === updated.id ? updated : h)));
-      setCurrentAnswerText('');
+      setCurrentAnswerText({});
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to submit practice answer.');
     } finally {
@@ -279,15 +280,15 @@ export const PracticePage: React.FC = () => {
                           <textarea
                             rows={3}
                             placeholder="Type your concise answer or solution here..."
-                            value={currentAnswerText}
-                            onChange={(e) => setCurrentAnswerText(e.target.value)}
+                            value={currentAnswerText[q.id] || ''}
+                            onChange={(e) => setCurrentAnswerText((prev) => ({ ...prev, [q.id]: e.target.value }))}
                             className="w-full px-3.5 py-2.5 bg-slate-800/90 border border-slate-700 rounded-xl text-white text-xs placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
                           />
 
                           <div className="flex justify-end">
                             <button
                               onClick={() => handleSubmitAnswer(q.id)}
-                              disabled={answering || !currentAnswerText.trim()}
+                              disabled={answering || !(currentAnswerText[q.id] || '').trim()}
                               className="inline-flex items-center space-x-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-xl transition-all shadow-md shadow-purple-600/20"
                             >
                               <Send className="w-3 h-3" />
@@ -328,7 +329,7 @@ export const PracticePage: React.FC = () => {
                   key={h.id}
                   onClick={() => {
                     setActiveSession(h);
-                    setCurrentAnswerText('');
+                    setCurrentAnswerText({});
                   }}
                   className={`p-4 rounded-2xl border cursor-pointer transition-all space-y-1.5 ${
                     activeSession?.id === h.id

@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import List
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
@@ -22,9 +23,11 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_3: str = ""
     GEMINI_API_KEY_4: str = ""
     GEMINI_API_KEYS: str = ""
+
     GEMINI_MODEL: str = "gemini-3.8-flash"
     GEMINI_FAST_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_FALLBACK_MODEL: str = "gemini-3.7-flash"
+
     GEMINI_RPM_LIMIT: int = Field(default=5, ge=1)
 
     # Groq configuration
@@ -40,7 +43,8 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = (
         "http://localhost:5173,"
         "http://localhost:3000,"
-        "http://127.0.0.1:5173"
+        "http://127.0.0.1:5173,"
+        "https://ai-interview-simulator2.netlify.app"
     )
 
     MAX_UPLOAD_MB: int = 10
@@ -50,7 +54,7 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> List[str]:
         return [
-            origin.strip()
+            origin.strip().rstrip("/")
             for origin in self.CORS_ORIGINS.split(",")
             if origin.strip()
         ]
